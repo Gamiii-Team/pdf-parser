@@ -1,7 +1,7 @@
 // index.js
 import path from "path";
 import { fileURLToPath } from "url";
-import { extractTextFromPdf } from "./src/extractor.js"; // Note the .js extension
+import { extractTextFromPdf, extractTablesFromPdf } from "./src/extractor.js"; // Note the .js extension
 
 // ES Module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -14,14 +14,27 @@ async function main() {
   const pdfPath = path.join(__dirname, "test.pdf");
 
   try {
-    console.log("📄 Extracting text from test.pdf...");
+    // 1. Extract Plain Text
+    console.log("📄 Step 1: Extracting plain text...");
     const extractedText = await extractTextFromPdf(pdfPath);
+    console.log(
+      "✅ Plain text extracted. Length:",
+      extractedText.length,
+      "chars\n",
+    );
 
-    console.log("\n✅ Extraction Successful!\n");
-    console.log("📊 Total Characters:", extractedText.length);
-    console.log("\n📝 Text Preview");
+    // 2. Extract Structured Tables
+    console.log("📊 Step 2: Extracting structured table data...");
+    const tables = await extractTablesFromPdf(pdfPath);
+
+    console.log(`✅ Found ${tables.length} potential rows of tabular data.\n`);
+
+    // Display the first 5 rows of the extracted table as an example
+    console.log("📝 Table Preview (First 5 rows):");
     console.log("--------------------------------------------------");
-    console.log(extractedText);
+    tables.slice(0, 50_000_000_000).forEach((row, index) => {
+      console.log(`Row ${index + 1}:`, row.join(" | "));
+    });
     console.log("--------------------------------------------------\n");
   } catch (error) {
     console.error("❌ Error:", error.message);

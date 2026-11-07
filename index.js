@@ -14,28 +14,44 @@ async function main() {
   const pdfPath = path.join(__dirname, "test.pdf");
 
   try {
-    // 1. Extract Plain Text
+    // ==========================================
+    // 1. Extract and Print FULL Plain Text
+    // ==========================================
     console.log("📄 Step 1: Extracting plain text...");
     const extractedText = await extractTextFromPdf(pdfPath);
-    console.log(
-      "✅ Plain text extracted. Length:",
-      extractedText.length,
-      "chars\n",
-    );
 
-    // 2. Extract Structured Tables
+    console.log("✅ Plain text extracted successfully.");
+    console.log("📊 Total Characters:", extractedText.length);
+
+    console.log("\n📝 FULL DOCUMENT CONTENTS:");
+    console.log("=".repeat(60));
+    // This prints the entire extracted text of the document
+    console.log(extractedText);
+    console.log("=".repeat(60) + "\n");
+
+    // ==========================================
+    // 2. Extract and Print ALL Table Rows
+    // ==========================================
     console.log("📊 Step 2: Extracting structured table data...");
     const tables = await extractTablesFromPdf(pdfPath);
 
-    console.log(`✅ Found ${tables.length} potential rows of tabular data.\n`);
+    // Dynamically calculate the total row count based on the array length
+    const totalRows = tables.length;
+    console.log(`✅ Found a total of ${totalRows} rows of tabular data.\n`);
 
-    // Display the first 5 rows of the extracted table as an example
-    console.log("📝 Table Preview (First 5 rows):");
-    console.log("--------------------------------------------------");
-    tables.slice(0, 50_000_000_000).forEach((row, index) => {
-      console.log(`Row ${index + 1}:`, row.join(" | "));
-    });
-    console.log("--------------------------------------------------\n");
+    if (totalRows > 0) {
+      console.log("📝 FULL TABLE DATA (All Rows):");
+      console.log("-".repeat(60));
+
+      // Iterate through EVERY single row dynamically (no hardcoded limits)
+      tables.forEach((row, index) => {
+        console.log(row.join(" | "));
+      });
+
+      console.log("-".repeat(60) + "\n");
+    } else {
+      console.log("ℹ️  No tabular data (rows) were detected in this PDF.\n");
+    }
   } catch (error) {
     console.error("❌ Error:", error.message);
     console.log(

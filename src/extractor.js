@@ -15,10 +15,21 @@ export async function extractTextFromPdf(filePath) {
     // unpdf requires a Uint8Array
     const uint8Array = new Uint8Array(dataBuffer);
 
-    const result = await extractText(uint8Array, { mergePages: true });
+    const result = await extractText(uint8Array, { mergePages: false });
+    console.log("result: " + result);
 
     // 3. Clean up excessive whitespace
-    const cleanText = result.text.replace(/\s+/g, " ").trim();
+    // const cleanText = result.text.replace(/\s+/g, " ").trim();
+
+    const cleanText = (
+      Array.isArray(result.text)
+        ? result.text.join(" ")
+        : typeof result.text === "string"
+          ? result.text
+          : ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
 
     return cleanText;
   } catch (error) {

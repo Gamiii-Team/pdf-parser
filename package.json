@@ -1,17 +1,24 @@
 {
-  "name": "test",
+  "name": "pdf-parser",
   "version": "1.0.0",
-  "type": "module",
   "description": "",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gamiii-Team/pdf-parser.git"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Gamiii-Team/pdf-parser/issues"
+  },
+  "homepage": "https://github.com/Gamiii-Team/pdf-parser#readme",
   "dependencies": {
     "pdf-parse": "^2.4.5",
-    "unpdf": "^1.9.1"
+    "unpdf": "^2.1.0"
   }
 }

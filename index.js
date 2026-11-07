@@ -2,6 +2,7 @@
 import path from "path";
 import { fileURLToPath } from "url";
 import { extractTextFromPdf, extractTablesFromPdf } from "./src/extractor.js"; // Note the .js extension
+import { detectVisualPages } from "./src/visual/pageDetector.js";
 
 // ES Module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -52,6 +53,46 @@ async function main() {
     } else {
       console.log("ℹ️  No tabular data (rows) were detected in this PDF.\n");
     }
+
+    // ==========================================
+    // 3. Identify Pages Containing Visual Content
+    // ==========================================
+    console.log("🖼️ Step 3: Detecting visual content...");
+
+    const visualAnalysis = await detectVisualPages(pdfPath);
+
+    console.log(`✅ Analyzed ${visualAnalysis.totalPages} PDF pages.`);
+
+    console.log(
+      `🔍 Potential visual pages: ${visualAnalysis.candidateCount}\n`,
+    );
+
+    console.log("📊 PAGE ANALYSIS:");
+    console.log("=".repeat(90));
+
+    console.table(
+      visualAnalysis.pages.map((page) => ({
+        Page: page.pageNumber,
+        Images: page.imageCount,
+        Table: page.tableMetrics.rowCount,
+        ImageCoverage: page.imageCoverage,
+        TextLength: page.visibleTextLength,
+        Candidate: page.isCandidate ? "YES" : "NO",
+        Reasons: page.reasons.join(", "),
+      })),
+    );
+
+    console.log("=".repeat(130));
+
+    // if (visualAnalysis.candidateCount > 0) {
+    //   console.log("\n🖼️ CANDIDATE VISUAL CONTENT:");
+
+    //   for (const page of visualAnalysis.candidates) {
+    //     console.log(`\nPage ${page.pageNumber}`);
+    //     console.log("Reasons:", page.reasons.join(", "));
+    //     console.log("Text preview:", page.textPreview);
+    //   }
+    // }
   } catch (error) {
     console.error("❌ Error:", error.message);
     console.log(

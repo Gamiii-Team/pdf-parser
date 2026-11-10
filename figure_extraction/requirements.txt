@@ -1,0 +1,11 @@
+# Local dependencies for the extraction pipeline.
+# Torch/transformers live inside the Modal image — see figure_extraction/florence.py.
+pymupdf>=1.24
+pillow>=10
+requests>=2.31
+python-dotenv>=1.0
+fastapi>=0.115  # used by florence.py, which the Modal CLI imports when deploying
+numpy>=1.26
+sentence-transformers>=3.0  # MiniLM embeddings for the graphic/non-graphic filter (local, CPU)
+# Only needed to deploy/manage the endpoint (modal deploy, modal secret create) — not for inference.
+modal>=1.0

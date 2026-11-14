@@ -1,0 +1,231 @@
+{
+  "subject": "unknown",
+  "subject_source": "unavailable",
+  "pages": 2,
+  "sections": [
+    {
+      "heading": "Sample Report with Tables & Images",
+      "level": 1,
+      "pages": [
+        1
+      ],
+      "content": [
+        {
+          "page": 1,
+          "caption": null,
+          "needs_review": false,
+          "type": "text",
+          "content": "First-Half Performance Summary"
+        }
+      ],
+      "subsections": [
+        {
+          "heading": "1. Overview",
+          "level": 2,
+          "pages": [
+            1
+          ],
+          "content": [
+            {
+              "page": 1,
+              "caption": null,
+              "needs_review": false,
+              "type": "text",
+              "content": "This is a sample document that combines text, tables and images. You can replace any of the content with your own, then save or export the file as a PDF from Word, Google Docs or LibreOffice."
+            },
+            {
+              "page": 1,
+              "caption": null,
+              "needs_review": false,
+              "type": "list",
+              "items": [
+                "Revenue grew steadily across the half-year.",
+                "Product A remains the largest contributor.",
+                "Costs stayed within budget in every month."
+              ]
+            }
+          ],
+          "subsections": []
+        },
+        {
+          "heading": "2. Monthly Figures",
+          "level": 2,
+          "pages": [
+            1
+          ],
+          "content": [
+            {
+              "page": 1,
+              "caption": null,
+              "needs_review": false,
+              "type": "text",
+              "content": "The table below lists revenue, costs and profit for each month."
+            },
+            {
+              "page": 1,
+              "caption": "Table 1: Monthly financial summary",
+              "needs_review": false,
+              "type": "table",
+              "header_rows": 1,
+              "content": {
+                "columns": [
+                  "Month",
+                  "Revenue ($K)",
+                  "Costs ($K)",
+                  "Profit ($K)"
+                ],
+                "rows": [
+                  [
+                    "January",
+                    "42",
+                    "30",
+                    "12"
+                  ],
+                  [
+                    "February",
+                    "48",
+                    "33",
+                    "15"
+                  ],
+                  [
+                    "March",
+                    "55",
+                    "36",
+                    "19"
+                  ],
+                  [
+                    "April",
+                    "51",
+                    "35",
+                    "16"
+                  ],
+                  [
+                    "May",
+                    "63",
+                    "40",
+                    "23"
+                  ],
+                  [
+                    "June",
+                    "70",
+                    "43",
+                    "27"
+                  ]
+                ]
+              }
+            }
+          ],
+          "subsections": []
+        },
+        {
+          "heading": "3. Charts",
+          "level": 2,
+          "pages": [
+            2
+          ],
+          "content": [
+            {
+              "page": 2,
+              "caption": null,
+              "needs_review": false,
+              "type": "text",
+              "content": "The chart below shows the revenue trend over the six months."
+            },
+            {
+              "page": 2,
+              "caption": "Figure 1: Monthly revenue",
+              "needs_review": false,
+              "type": "chart",
+              "chart_type": "other",
+              "title": null,
+              "description": null,
+              "content": null,
+              "estimates": false
+            }
+          ],
+          "subsections": [
+            {
+              "heading": "Sales by Product",
+              "level": 3,
+              "pages": [
+                2
+              ],
+              "content": [
+                {
+                  "page": 2,
+                  "caption": null,
+                  "needs_review": false,
+                  "type": "text",
+                  "content": "The pie chart shows how sales were split between products."
+                },
+                {
+                  "page": 2,
+                  "caption": "Figure 2: Share of sales by product",
+                  "needs_review": false,
+                  "type": "chart",
+                  "chart_type": "other",
+                  "title": null,
+                  "description": null,
+                  "content": null,
+                  "estimates": false
+                }
+              ],
+              "subsections": []
+            }
+          ]
+        },
+        {
+          "heading": "4. Product Comparison",
+          "level": 2,
+          "pages": [
+            2
+          ],
+          "content": [
+            {
+              "page": 2,
+              "caption": "Table 2: Product comparison",
+              "needs_review": false,
+              "type": "table",
+              "header_rows": 1,
+              "content": {
+                "columns": [
+                  "Product",
+                  "Units Sold",
+                  "Avg. Price",
+                  "Rating"
+                ],
+                "rows": [
+                  [
+                    "Product A",
+                    "1,200",
+                    "$35.00",
+                    "4.6 / 5"
+                  ],
+                  [
+                    "Product B",
+                    "900",
+                    "$28.50",
+                    "4.3 / 5"
+                  ],
+                  [
+                    "Product C",
+                    "600",
+                    "$22.00",
+                    "4.1 / 5"
+                  ],
+                  [
+                    "Other",
+                    "300",
+                    "$15.00",
+                    "3.8 / 5"
+                  ]
+                ]
+              }
+            }
+          ],
+          "subsections": []
+        }
+      ]
+    }
+  ]
+}

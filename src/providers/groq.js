@@ -1,28 +1,29 @@
 // src/providers/groq.js
-// Provider adapter for the Groq API (groq-sdk). Model default:
-// qwen/qwen3.8-27b (vision-capable; see console.groq.com/docs/vision).
-// Documented limits for this model: <= 3 images per request, <= 20 MB per
-// request, 2048 input tokens per image, 131K context window.
+// Groq API adapter (groq-sdk). For vision page prompts and figure prompts.
+// Default model: qwen/qwen3.8-27b (per user preference).
 
 import Groq from "groq-sdk";
-import { withRetry } from "../util/retry.js";
+import { withRetry, httpErrorFromResponse } from "../util/retry.js";
 import { config } from "../config.js";
 
+const GROQ_MAX_IMAGES_PER_REQUEST = 3;
+const GROQ_MAX_REQUEST_BYTES = 20 * 1024 * 1024;
+
 export function makeGroqAdapter() {
-  const { apiKey, model } = config.groq;
-  if (!apiKey) throw new Error("GROQ_API_KEY is not set");
+  const { groqApiKey, groqModel } = config;
+  if (!groqApiKey) throw new Error("GROQ_API_KEY is not set");
 
-  const client = new Groq({ apiKey });
+  const client = new Groq({ apiKey: groqApiKey });
 
-  async function request(messages, { maxTokens, temperature, withReasoningEffort }) {
+  async function call(messages, { maxTokens = 8192, temperature = 0.1, withReasoningEffort } = {}) {
     const body = {
-      model,
+      model: groqModel,
       messages,
-      temperature,
-      top_p: 1,
       max_completion_tokens: maxTokens,
       stream: false,
       response_format: { type: "json_object" },
+      temperature,
+      top_p: 1,
     };
     if (withReasoningEffort) body.reasoning_effort = "low";
     return client.chat.completions.create(body);
@@ -30,18 +31,19 @@ export function makeGroqAdapter() {
 
   return {
     name: "groq",
-    model,
+    model: groqModel,
     async complete(messages, { maxTokens = 8192, temperature = 0.1 } = {}) {
       return withRetry(
         async () => {
+          // Strip images past the per-request cap
+          const trimmed = trimImages(messages);
           let resp;
           try {
-            resp = await request(messages, { maxTokens, temperature, withReasoningEffort: true });
+            resp = await call(trimmed, { maxTokens, temperature, withReasoningEffort: true });
           } catch (err) {
-            // If the provider rejects reasoning_effort for this model, retry once without it.
             const msg = String(err?.message ?? err);
             if (/reasoning_effort/i.test(msg)) {
-              resp = await request(messages, { maxTokens, temperature, withReasoningEffort: false });
+              resp = await call(trimmed, { maxTokens, temperature, withReasoningEffort: false });
             } else {
               throw err;
             }
@@ -55,8 +57,28 @@ export function makeGroqAdapter() {
               : { input: 0, output: 0 },
           };
         },
-        { retries: config.httpRetries, label: "groq" },
+        { retries: config.httpRetries ?? 6, label: "groq" },
       );
     },
   };
+}
+
+function trimImages(messages) {
+  // Count images in all message content arrays; drop extras with a warning-style swap
+  let images = 0;
+  return messages.map((m) => {
+    if (Array.isArray(m.content)) {
+      const kept = [];
+      for (const part of m.content) {
+        if (part?.type === "image_url") {
+          if (images < GROQ_MAX_IMAGES_PER_REQUEST) { images += 1; kept.push(part); continue; }
+          // drop extra images
+          continue;
+        }
+        kept.push(part);
+      }
+      return { ...m, content: kept };
+    }
+    return m;
+  });
 }

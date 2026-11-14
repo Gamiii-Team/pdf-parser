@@ -1,0 +1,3 @@
+# Runtime dependencies for scripts run via src/pymupdf/worker.py.
+# Rebuild from scratch with: npm run setup
+pymupdf>=1.24.8

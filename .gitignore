@@ -1,9 +1,7 @@
 node_modules
 .env
-extracted_figures/
-.cache/
-out/
-samples/.eval/
 __pycache__/
 *.pyc
 .venv/
+out/
+.cache/

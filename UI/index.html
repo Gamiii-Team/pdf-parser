@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>PDF → Structured JSON · Document intelligence</title>
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="%23f59e0b"/><text x="16" y="22" font-size="17" text-anchor="middle" font-family="monospace" fill="%231c1917">{}</text></svg>' />
+  <link rel="stylesheet" href="./css/app.css" />
+</head>
+<body>
+  <!-- ══════════ top bar ══════════ -->
+  <header class="topbar">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1" y="1" width="30" height="30" rx="7" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M11 11h10M11 16h10M11 21h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-name">PDF → Structured JSON</span>
+        <span class="brand-sub">document intelligence</span>
+      </div>
+    </div>
+    <div class="status-wrap">
+      <span id="backend-status" class="pill pill-unknown" role="status">checking…</span>
+      <a class="setup-link" href="#env-helper">how to connect</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ══════════ left rail: inputs ══════════ -->
+    <aside class="rail" aria-label="Controls">
+      <!-- input card -->
+      <section class="card" aria-labelledby="h-input">
+        <h2 id="h-input">Input</h2>
+        <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-describedby="drop-hint">
+          <svg viewBox="0 0 24 24" class="dz-icon" aria-hidden="true"><path fill="currentColor" d="M12 3a1 1 0 0 1 .72.33l5 5a1 1 0 1 1-1.44 1.4l-3.27-3.28V14a1 1 0 1 1-2 0V7.45L8.74 9.73a1 1 0 0 1-1.44-1.4l5-5A1 1 0 0 1 12 3z"/><path fill="currentColor" d="M5 15a1 1 0 0 1 1 1v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-3a1 1 0 1 1 2 0v3a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3v-3a1 1 0 0 1 1-1z"/></svg>
+          <div class="dz-title">Drop a file here</div>
+          <div id="drop-hint" class="dz-sub">.pdf · .png · .jpg · .tiff · .webp · .bmp &nbsp;·&nbsp; max 25 pages, 50 MB<br/>or click to browse</div>
+          <input id="file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp,.bmp" hidden />
+        </div>
+        <div id="file-chip" class="file-chip hidden">
+          <span class="fc-icon" aria-hidden="true">📄</span>
+          <span id="file-chip-name" class="fc-name"></span>
+          <span id="file-chip-size" class="fc-size"></span>
+          <button id="file-chip-clear" class="icon-btn" aria-label="remove file">×</button>
+        </div>
+        <div class="demo-row">
+          <span class="demo-label">or run a demo</span>
+          <div class="demo-btns" id="demo-btns">
+            <button class="demo-btn" data-demo="test.pdf" type="button">
+              <span class="demo-name">test.pdf</span>
+              <span class="demo-sub">born-digital · free (text-layer)</span>
+            </button>
+            <button class="demo-btn" data-demo="fixtures/scanned.pdf" type="button">
+              <span class="demo-name">scanned.pdf</span>
+              <span class="demo-sub">scanned · calls VLM · costs tokens</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- method card -->
+      <section class="card" aria-labelledby="h-method">
+        <h2 id="h-method">Method</h2>
+        <label class="select-wrap">
+          <span class="select-hint">backend</span>
+          <select id="backend-select" aria-label="model backend">
+            <option value="groq" selected>Groq — qwen/qwen3.8-27b</option>
+            <option value="modal">Modal vLLM — Qwen/Qwen3-VL-8B-Instruct-FP8</option>
+          </select>
+        </label>
+        <p id="backend-note" class="backend-note"></p>
+        <div id="env-helper" class="env-helper">
+          <div class="env-head">
+            <span>.env for Modal vLLM</span>
+            <button id="copy-env" class="mini-btn" type="button">Copy</button>
+          </div>
+          <pre id="env-block">VLM_BACKEND=modal
+VLLM_ENDPOINT_URL=&lt;deploy prints this&gt;
+VLLM_API_TOKEN=&lt;MODAL_API_SECRET from the florence-api secret&gt;</pre>
+          <p class="env-note">Deploy the shipped app: <code>python -m modal deploy modal/vllm_app.py</code>
+            (persistent vLLM, A100-40GB, scales to zero after 300 s idle).
+            Or point this at any OpenAI-compatible vLLM server you run yourself.</p>
+        </div>
+      </section>
+
+      <!-- options card -->
+      <section class="card" aria-labelledby="h-options">
+        <h2 id="h-options">Options</h2>
+        <label class="field">
+          <span>subject <em>(optional)</em></span>
+          <input id="subject" type="text" placeholder="leave empty to auto-detect" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="opt-figure-pass" checked />
+          <span class="track" aria-hidden="true"></span>
+          <span class="toggle-text">analyze figures<small>bar / line / pie extraction via VLM</small></span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="opt-subject-detect" checked />
+          <span class="track" aria-hidden="true"></span>
+          <span class="toggle-text">auto-detect subject<small>one small LLM call when subject is empty</small></span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="opt-force-vlm" />
+          <span class="track" aria-hidden="true"></span>
+          <span class="toggle-text">force VLM everywhere<small>even born-digital pages go to the model</small></span>
+        </label>
+      </section>
+
+      <button id="run-btn" class="cta" type="button" disabled>
+        <span id="run-btn-label">Analyze →</span>
+      </button>
+      <p class="fine-print">⌘/Ctrl + Enter · runs entirely on this machine · localhost only</p>
+    </aside>
+
+    <!-- ══════════ result stage ══════════ -->
+    <section class="stage" aria-label="Result">
+      <!-- empty -->
+      <div id="empty-state" class="empty">
+        <svg class="empty-glyph" viewBox="0 0 120 120" aria-hidden="true">
+          <path d="M30 24h40l20 20v52a4 4 0 0 1-4 4H30a4 4 0 0 1-4-4V28a4 4 0 0 1 4-4z" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
+          <path d="M70 24v20h20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
+          <path d="M44 56h32M44 64h32M44 72h20" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+          <text x="60" y="108" font-size="13" text-anchor="middle" fill="currentColor" opacity="0.85">{}</text>
+        </svg>
+        <h3>Document in, structure out.</h3>
+        <p>Drop your PDF (or an image) and get a nested, model-ready JSON tree —<br>headings, lists, real tables, and chart data.</p>
+        <button class="demo-btn big" data-demo="test.pdf" type="button">Try the <span class="mono">test.pdf</span> demo →</button>
+      </div>
+
+      <!-- loading -->
+      <div id="loading" class="loading hidden" aria-live="polite">
+        <div class="spinner"></div>
+        <p id="loading-line" class="loading-line">running pipeline…</p>
+        <div class="skel skel-wide"></div>
+        <div class="skel"></div>
+        <div class="skel"></div>
+      </div>
+
+      <!-- result -->
+      <div id="result" class="result hidden">
+        <div id="summary-band" class="summary" role="status"></div>
+        <div class="tabs" role="tablist" aria-label="Output">
+          <button class="tab active" data-tab="tree" role="tab" id="tabbtn-tree" aria-selected="true">Document</button>
+          <button class="tab" data-tab="raw" role="tab" id="tabbtn-raw" aria-selected="false">Raw JSON</button>
+          <button class="tab" data-tab="report" role="tab" id="tabbtn-report" aria-selected="false">Run report</button>
+          <span class="tabs-spacer"></span>
+          <button id="copy-output" class="mini-btn" type="button">Copy</button>
+          <button id="dl-manifest" class="mini-btn" type="button">manifest ↓</button>
+          <button id="dl-report" class="mini-btn" type="button">report ↓</button>
+        </div>
+        <div id="tab-tree" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-tree"><div id="sections-tree"></div></div>
+        <div id="tab-raw" class="tab-panel hidden" role="tabpanel" aria-labelledby="tabbtn-raw"><pre id="raw-pre" class="code"></pre></div>
+        <div id="tab-report" class="tab-panel hidden" role="tabpanel" aria-labelledby="tabbtn-report"><pre id="report-pre" class="code"></pre></div>
+      </div>
+
+      <!-- error drawer -->
+      <div id="error-drawer" class="error-drawer hidden" role="alert">
+        <div class="ed-head"><span class="ed-title">Pipeline error (raw)</span>
+          <button id="ed-copy" class="mini-btn" type="button">Copy</button>
+          <button id="ed-close" class="mini-btn" type="button">Dismiss</button>
+        </div>
+        <pre id="ed-body" class="ed-body"></pre>
+      </div>
+    </section>
+
+    <!-- ══════════ history ══════════ -->
+    <aside class="history" aria-label="Run history">
+      <div class="history-head">Run history<span id="history-count" class="history-count">0</span></div>
+      <div id="history-list" class="history-list"></div>
+    </aside>
+  </main>
+
+  <footer class="foot">
+    <span>localhost only · no auth · anyone with this machine can spend your model quota</span>
+    <span id="foot-host"></span>
+  </footer>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="./js/app.js" defer></script>
+</body>
+</html>

@@ -29,7 +29,8 @@ Request JSON:
 
 Response JSON (200):
     {"model": "microsoft/Florence-2-large-ft", "dpi": 200, "pages": <n>,
-     "results": [ [{bbox, label, caption}] | {"page_error": str}, ... ]}
+     "results": [ [{bbox, label, caption}] | {"page_error": str}, ... ],
+     "ocr":     [ {"ocr_text": str, "ocr_with_region": [{text, bbox}, ...]} | {"page_error": str}, ... ]}
 
 `results[i]` corresponds to page `i+1` of the PDF. A failed page yields a
 dict with "page_error" instead of a list, so one bad page never fails the
@@ -134,8 +135,8 @@ def _run_task(processor, model, torch, image, task, text=None):
     return processor.post_process_generation(raw, task=task, image_size=image.size)
 
 
-def _detect_and_caption_one(processor, model, torch, page_png: bytes, phrases: str) -> list[dict]:
-    """Run grounding + per-region captioning on one rendered page."""
+def _detect_and_caption_one(processor, model, torch, page_png: bytes, phrases: str) -> tuple[list[dict], str, list[dict]]:
+    """Run grounding + per-region captioning + OCR on one rendered page."""
     from PIL import Image
 
     page_image = Image.open(io.BytesIO(page_png)).convert("RGB")
@@ -148,6 +149,29 @@ def _detect_and_caption_one(processor, model, torch, page_png: bytes, phrases: s
     ground_data = ground.get("<CAPTION_TO_PHRASE_GROUNDING>", {}) or {}
     bboxes = ground_data.get("bboxes", []) or []
     labels = ground_data.get("labels", []) or []
+
+    ocr_plain = _run_task(processor, model, torch, page_image, "<OCR>")
+    ocr_text = (ocr_plain.get("<OCR>") or "").strip()
+
+    ocr_region = _run_task(processor, model, torch, page_image, "<OCR_WITH_REGION>")
+    region_data = ocr_region.get("<OCR_WITH_REGION>") or {}
+    quads = region_data.get("quad_boxes") or []
+    texts = region_data.get("labels") or []
+
+    ocr_tokens: list = []
+    for bbox, text in zip(quads, texts):
+        try:
+            xs = [float(v) for v in bbox]
+            x1, y1, x2, y2, x3, y3, x4, y4 = xs
+            res = {
+                "text": str(text or ""),
+                "bbox": [min(x1, x2, x3, x4), min(y1, y2, y3, y4),
+                         max(x1, x2, x3, x4), max(y1, y2, y3, y4)],
+            }
+            if res["bbox"][2] - res["bbox"][0] >= 4 and res["bbox"][3] - res["bbox"][1] >= 4:
+                ocr_tokens.append(res)
+        except Exception:
+            continue
 
     detections = []
     for bbox, label in zip(bboxes, labels):
@@ -173,7 +197,7 @@ def _detect_and_caption_one(processor, model, torch, page_png: bytes, phrases: s
                 "caption": caption,
             }
         )
-    return detections
+    return detections, ocr_text, ocr_tokens
 
 
 # --- PDF handling (this app only) ---------------------------------------------
@@ -247,14 +271,18 @@ async def extract_pdf(request: fastapi.Request):
 
     processor, model, torch, model_id = _load_model()
     results: list = []
+    ocr: list = []
     page_count = 0
     try:
         for page_number, page_png in _render_pdf_pages(pdf_bytes, dpi):
             page_count += 1
             try:
-                results.append(_detect_and_caption_one(processor, model, torch, page_png, phrases))
+                detections, ocr_text, ocr_tokens = _detect_and_caption_one(processor, model, torch, page_png, phrases)
+                results.append(detections)
+                ocr.append({"ocr_text": ocr_text, "ocr_with_region": ocr_tokens})
             except Exception as exc:  # per-page isolation: one bad page must not kill the upload
                 results.append({"page_error": str(exc)})
+                ocr.append({"page_error": str(exc)})
     except Exception as exc:
         return fastapi.responses.JSONResponse(
             {"error": f"failed to render the uploaded PDF: {exc}"}, status_code=400
@@ -263,7 +291,7 @@ async def extract_pdf(request: fastapi.Request):
     if page_count == 0:
         return fastapi.responses.JSONResponse({"error": "the PDF has no pages"}, status_code=400)
 
-    return {"model": model_id, "dpi": dpi, "pages": page_count, "results": results}
+    return {"model": model_id, "dpi": dpi, "pages": page_count, "results": results, "ocr": ocr}
 
 
 @app.function(image=image, timeout=30)

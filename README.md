@@ -13,21 +13,105 @@ audit manifest covering saved, duplicate, rejected, and no-detection cases.
 
 ## Repository layout
 
+Everything lives in this one README; there are no nested docs. All configuration
+— every app and mode — lives in **root `.env` / `.env.example` only** (no
+per-folder env files). Links below jump straight to the code.
+
 ```
-index.js, src/            # existing Node.js extraction pipeline (unpdf/pdfjs)
-.venv/                    # local Python virtualenv (gitignored)
-.env / .env.example       # endpoint URL + API secret (.env is gitignored)
-figure_extraction/        # this Python pipeline (Florence-2 on Modal)
-    florence.py           # Modal app: HTTP endpoint, page image -> detections + captions
-    florence_pdf.py       # second Modal app: whole PDF -> detections JSON (PDF→JSON scenario)
-    pipeline.py           # CLI: render -> POST to endpoint -> crop -> validate -> manifest
-    pdf_to_json.py        # CLI: upload the PDF itself -> manifest-like JSON (no crops saved)
-    requirements.txt      # local Python dependencies
+index.js                  # legacy JS demo: text + "tables" + visual-page candidates (unpdf)
+src/
+  extractor.js            # legacy unpdf text/table extraction (used by index.js)
+  visual/pageDetector.js  # visual-page candidate detector (images, coverage, captions, grids)
+  # --- chunked document extraction (see "Chunked document extraction" below) ---
+  extractDocument.js      # mode-agnostic entry: input -> elements -> stitch -> chunk -> manifest
+  cli.js                  # CLI: node src/cli.js <input> --mode <mode>
+  config.js               # all env-driven config (no secrets hardcoded)
+  elements.js             # element factory, normalized 0–1 bboxes, deterministic ids
+  pdfModel.js             # born-digital PDFs -> script elements (unpdf + fontSize heuristics)
+  render.js               # PDF/image inputs, pdftoppm rendering, page sizes (pdfinfo)
+  florenceClient.js       # client for the deployed Florence-2 Modal apps
+  stitch.js               # caption pairing, cross-page table merge, oversized-table split
+  chunker.js              # headings -> sections -> chunks; completeness check; TOC; overlap
+  schema.js               # Ajv validation against schemas/
+  modes/
+    pageImage.js          # full-modal / full-groq page pipeline (identical; adapter differs)
+    hybridFlorence.js     # hybrid-florence: script elements + Florence figure detection
+  providers/
+    modalVllm.js          # OpenAI-compatible adapter (plain fetch) for the vLLM app
+    groq.js               # Groq adapter (groq-sdk, qwen/qwen3.8-27b)
+  figureAnalyzer/
+    index.js              # swappable analyzer interface (florence | groq | modal-vllm)
+    florence.js           # caption-only analyzer (structured data intentionally not invented)
+    vlm.js                # VLM analyzer: type-specific prompts over a cropped figure
+  prompts/                # versioned prompt files (never inline)
+    page.prompt.md        # whole-page extraction prompt
+    figure-chart.prompt.md  figure-flowchart.prompt.md  figure-photo.prompt.md
+    index.js              # loader + {{placeholder}} filler
+  util/                   # hash, FileCache, concurrency semaphore, retry/jitter, log, tokens
+schemas/
+  element.schema.json     # element contract (table rows required; figure type+description)
+  chunk.schema.json       # chunked manifest chunk contract
+  manifest.schema.json    # final manifest document (mode, model, toc, pages, …)
+  raw-element.schema.json / raw-page-response.schema.json   # tolerant model-output schemas
+modal/
+  vllm_app.py             # Modal app florence2-vllm: vLLM + Qwen3-VL-4B-Instruct, OpenAI-compatible
+figure_extraction/        # Python Florence-2 pipeline (Modal)
+  florence.py             # app florence2-figure-extractor: page image -> detections + captions
+  florence_pdf.py         # app florence2-pdf-extractor: whole PDF -> detections JSON (PDF→JSON)
+  pipeline.py             # crop-and-save CLI (local post-processing; see "Run")
+  pdf_to_json.py          # PDF -> Modal -> manifest-like JSON, no PNGs written (see below)
+  requirements.txt        # local Python dependencies
+tests/                    # node:test unit tests (chunker, stitch, elements, schema, page-image)
 scripts/
-    setup_modal.sh        # one-shot: secret -> deploy both apps -> .env wiring (never prints secrets)
+  setup_modal.sh          # one-shot: secret -> deploy BOTH Florence apps -> .env wiring
+  eval.js                 # side-by-side mode comparison on ./samples
 test.pdf                  # sample PDF used in the examples below
 extracted_figures/        # pipeline output (gitignored)
+out/                      # extraction-mode output (gitignored)
+.cache/extractions/       # paid-call cache (gitignored)
 ```
+
+See **Deploying to Modal** below for how the Python apps and the vLLM app are
+deployed, which `.env` variable each fills, and how auth works.
+
+## Which scenario should I use?
+
+The **same PDF** can go through three different pipelines. Pick by the output
+you want; every command below spends real money (Modal GPU time or Groq API
+calls), and each prints a `manifest.json` (or points to one).
+
+| # | Command | What you get | Cost per run | First-time prerequisite |
+|---|---|---|---|---|
+| 1 | `python -m figure_extraction.pipeline ./test.pdf` | PNGs of each cropped figure/table + an audit `manifest.json` (schema v3) in `extracted_figures/test/` | 1 Modal run | nothing — detect app already deployed |
+| 2 | `python -m figure_extraction.pdf_to_json ./test.pdf --out ./out/test.pdf.json` | one JSON only (manifest-like, schema v3, `no_images_saved: true`); **no PNGs written** | 1 Modal run | deploy `florence_pdf.py` once (step 6 of `setup_modal.sh`) |
+| 3a | `node src/cli.js ./test.pdf --mode hybrid-florence` | **chunked** `manifest.json` + `run-report.json` (schema v1) for the downstream system | 1 Modal run | nothing — falls back to the deployed detect app |
+| 3b | `node src/cli.js ./test.pdf --mode full-florence` | same chunked manifest, Florence-family flavor; image-path on Modal | 1 Modal run | nothing — shares the Florence endpoint |
+| 3c | `node src/cli.js ./test.pdf --mode full-groq` | same as above, extraction via Groq (`qwen/qwen3.8-27b`) | 1 Groq call per page | `GROQ_API_KEY` in `.env` |
+| 3d | `node src/cli.js ./test.pdf --mode full-modal` | same as above, extraction via your Modal vLLM app (`Qwen/Qwen3-VL-4B-Instruct` bf16) | 1 Modal GPU run | deploy `modal/vllm_app.py` once |
+| 3e | `node src/cli.js ./test.pdf --mode full-qwen-8b` | same as above, extraction via Modal vLLM running `Qwen/Qwen3-VL-8B-Instruct-FP8` | 1 Modal GPU run | deploy `modal/full-qwen8b.py` once |
+| 3f | `node src/cli.js ./test.pdf --mode full-qwen-27b` | same as above, extraction via Modal vLLM running `Qwen/Qwen3.8-27B-Instruct-FP8` | 1 Modal GPU run (A100-40GB) | deploy `modal/full-qwen27b.py` once |
+
+Notes:
+
+- **1 and 2** use the same Florence-2 model; 2 additionally skips writing crops
+  and emits the pipeline's manifest as a single file (see the two sections below).
+- **3x** all produce the *chunked document* manifest (headings → sections →
+  chunks, completeness-checked, tables never split) consumed by the downstream
+  system — they differ only in who runs the vision model. `hybrid-florence`
+  and `full-florence` read the text layer locally and use Modal for figure
+  detection; `full-groq`, `full-modal`, `full-qwen-8b` and `full-qwen-27b`
+  send whole page images to a VLM.
+- Scenarios 1 and 2 support a plain-text `--debug` flag (what the model saw vs.
+  what it missed). The JS CLI (scenario 3x) has no debug flag; use
+  `--figure-pass` there to additionally extract structured chart/flowchart data
+  for figures. Each scenario's section below documents its exact flags:
+  **Run**, **PDF → JSON (no crops) scenario**, **Chunked document extraction**.
+- Cost reality check: a first Modal call after idle (or after a deploy) may
+  cold-start for a minute; after `VLLM_SCALEDOWN_WINDOW` seconds idle
+  (default 300), the vLLM container scales to zero and the next call cold-starts
+  for ~1–3 minutes.
+- Legacy demo: `node index.js` prints the extracted text / table rows / visual
+  page candidates for `test.pdf` and writes nothing.
 
 ## Architecture
 
@@ -168,6 +252,84 @@ Output layout (relative to the `--output-dir` you pass):
     manifest.json                 # audit manifest (see below)
 ```
 
+## Deploying the vLLM app for `full-modal` (`modal/vllm_app.py`)
+
+Same shape as the Florence deploy: one Python file, one Modal CLI call. The
+difference is *only* how the app is wired — a GPU container (T4 / A10G /
+A100-40GB) rather than a CPU fastapi endpoint — and where Modal reads its
+configuration: `modal/vllm_app.py` reads `VLLM_*` from the shell environment
+at deploy time, so load `.env` first.
+
+### Preconditions
+- Modal CLI authenticated (`python -m modal token new` — once, done for Florence)
+- A payment method on file (all GPU Modal instances require one)
+- `.env` complete — at minimum `VLLM_MODEL`, `VLLM_GPU`, `MODAL_API_SECRET`,
+  `MODAL_ENDPOINT_URL`
+- `VLLM_GPU=A100-40GB` set in `.env` (the value Modal reads at deploy time —
+  plain `A100` may silently upgrade you to 80 GB, `A100-40GB` forces 40 GB)
+
+### Commands (one-time)
+
+```bash
+# 1) Load .env into the shell (vllm_app.py reads os.environ at import time)
+set -a; source .env; set +a
+
+# 2) Deploy the vLLM app
+python -m modal deploy modal/vllm_app.py
+#   → Modal builds the image (~8 GB bake with the model weights)
+#   → prints the endpoint URL, e.g. https://<you>--florence2-vllm-proxy.us-east.modal.run
+
+# 3) Wire the proxy URL into .env
+sed -i "s|^MODAL_ENDPOINT_URL=.*|MODAL_ENDPOINT_URL=<printed proxy URL>|" .env
+```
+
+### Verify (no GPU needed for the liveness check)
+
+```bash
+# Liveness — separate non-GPU function, always returns {"status":"ok"} quickly
+curl -s https://<you>--florence2-vllm-healthz.us-east.modal.run
+
+# Smoke test: authenticated chat completion (auth = same secret as florence-api)
+curl -s -X POST https://<you>--florence2-vllm-proxy.us-east.modal.run/v1/chat/completions \
+  -H "Authorization: Bearer $MODAL_API_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3-VL-4B-Instruct",
+       "messages":[{"role":"user",
+                    "content":[{"type":"text",
+                                  "text":"Say OK"}]}],
+       "max_tokens":8,"stream":false}'
+# Expected: a normal OpenAI-shaped chat completion with a short reply
+```
+
+### Usage
+
+```bash
+node src/cli.js ./test.pdf --mode full-modal
+# → out/test/manifest.json   (chunked manifest, schema v1)
+# → out/test/run-report.json (timing, tokens, retries, cache hits)
+```
+
+### What the commands actually do
+- `modal deploy modal/vllm_app.py` uploads the file; at import time it reads
+  `VLLM_GPU`, `VLLM_MODEL`, `VLLM_SCALEDOWN_WINDOW`, `VLLM_MAX_MODEL_LEN`
+  and builds the image (baking
+  `Qwen/Qwen3-VL-4B-Instruct` weights into a layer at build time).
+- The CPU-only `healthz` function is always compiled; the GPU function
+  `proxy` is what handles real requests.
+- The proxy checks `Authorization: Bearer $MODAL_API_SECRET` against the
+  `florence-api` Modal secret before it ever touches the GPU, then forwards the
+  request to an in-container `vllm serve` on `127.0.0.1:8000`.
+- After 300 s idle (`VLLM_SCALEDOWN_WINDOW`) the GPU container is released
+  (A100-40GB ≈ **$2.10/hr** while it lives).
+
+### Troubleshooting
+- HTTP 401 → `MODAL_API_SECRET` in `.env` ≠ secret inside `florence-api`
+  (`python -m modal secret delete florence-api` then re-run `setup_modal.sh`).
+- 503 `{"error":"no upstreams available"}` → GPU allocated but `vllm serve`
+  crashed; check logs with `.venv/bin/python -m modal app logs florence2-vllm`.
+- Container stuck at `Pending` → GPU pool contention on the workspace plan;
+  fall back to `VLLM_GPU=T4` (fits 4B bf16 ~8 GB) or bump your Modal plan.
+
 ## Endpoint contract (`figure_extraction/florence.py`)
 
 |                |                                                                                                                   |
@@ -232,7 +394,261 @@ cold-start for a minute. Table 2-style model misses still appear as
 `status: "not_detected"` entries — this route does not detect differently,
 it just delivers the same pipeline output as one JSON file.
 
-## How Florence-2 is used, and how outputs become crops + filenames
+## Chunked document extraction (`src/extractDocument.js`)
+
+Next to the crop-and-save pipeline, the repo contains a separate **document
+extraction** flow that produces a single chunked `manifest.json` per input
+document — the format consumed by the downstream system (search, embeddings,
+LLM feeding, display). It keeps everything from the source document (text,
+tables, figures, captions) and breaks it into stable, well-structured chunks;
+nothing is silently dropped.
+
+```bash
+node src/cli.js ./test.pdf --mode hybrid-florence          # text layer + Modal Florence-2 figures
+node src/cli.js ./test.pdf --mode full-florence            # same flow; its own run + out dir
+node src/cli.js ./test.pdf --mode full-groq                # page images -> Groq API (qwen/qwen3.8-27b)
+node src/cli.js ./test.pdf --mode full-modal               # page images -> Modal vLLM (Qwen3-VL-4B-Instruct)
+node src/cli.js ./test.pdf --mode full-qwen-8b             # page images -> Modal vLLM (Qwen3-VL-8B-Instruct-FP8)
+node src/cli.js ./test.pdf --mode full-qwen-27b            # page images -> Modal vLLM (Qwen3.8-27B-Instruct-FP8, A100-40GB)
+node --test tests/                                         # unit tests, no network
+node scripts/eval.js samples/                              # side-by-side mode comparison
+```
+
+| Mode | Best for | Inference |
+|---|---|---|
+| `hybrid-florence` | born-digital PDFs with a text layer | local unpdf + Florence-2 crops for figures |
+| `full-florence` | same, but its own run/output namespace | same engine as `hybrid-florence`; `mode: "full-florence"` in the manifest |
+| `full-groq` | scans, images, any PDF | Groq API (vision model, `GROQ_MODEL`) |
+| `full-modal` | same, self-hosted | Modal + vLLM (`Qwen/Qwen3-VL-4B-Instruct` default, see **Deploying to Modal** below) |
+| `full-qwen-8b` | same, richer model | Modal + vLLM (`Qwen/Qwen3-VL-8B-Instruct-FP8`, fits T4) |
+| `full-qwen-27b` | same, strongest model | Modal + vLLM (`Qwen/Qwen3.8-27B-Instruct-FP8`, needs A100-40GB) |
+
+Outputs (per run, in `--out` dir or `out/<stem>/<mode>/`): `manifest.json`
+(chunked, Ajv-validated, completeness-checked — every extracted element lands
+in exactly one chunk) and `run-report.json` (pages, timing, tokens, cache hits,
+retries, warnings, completeness result). Elements are typed (`heading |
+paragraph | table | figure | equation | code | list | caption`) with normalized
+0–1 `bbox`,
+`source`, `needs_review`; figures carry `figure_type` + type-specific `data`
+(chart values are always marked as estimates); tables carry 2D `rows` with
+`header_rows`. Chunks carry `section_path` (from detected headings), `pages`,
+`token_estimate`, `prev_id`/`next_id`, and a table-of-contents is built into
+`document.toc`. Chunking never splits a table/figure/equation/code block across
+chunks and never separates a caption from its figure/table; oversized tables
+are split by row groups with the header repeated.
+
+`.env.example` is the exhaustive source of truth — every variable read by
+`src/config.js`, the Python clients, and the Modal vLLM app at deploy time is
+documented there. Key ones: `GROQ_API_KEY`, `GROQ_MODEL`,
+`MODAL_ENDPOINT_URL`, `MODAL_API_SECRET` (same secret as the Florence apps),
+`MODAL_PDF_EXTRACT_URL`, `DPI` (default 170), `CHUNK_TARGET_TOKENS` /
+`CHUNK_MAX_TOKENS` / `CHUNK_MIN_TOKENS` / `CHUNK_OVERLAP_TOKENS`,
+`CONCURRENCY`, `MODEL_RETRIES`, `CACHE_DIR` (results cached by image hash +
+mode + model + prompt version — reruns don't re-pay for model calls). The
+Modal vLLM app is deployed with `python -m modal deploy modal/vllm_app.py`
+and also honors `VLLM_GPU` / `VLLM_SCALEDOWN_WINDOW` / `VLLM_MAX_MODEL_LEN`
+(see the **Deploying to Modal** section).
+
+Notes / limitations: chart values read from pixels are estimates (always
+flagged `estimates`/`needs_review`); `full-groq` needs `GROQ_API_KEY` and the
+mode currently ships untested against the live API — see the summary for the
+current verification status. The Modal vLLM endpoint is provided in
+`modal/vllm_app.py` — see **Deploying to Modal** below.
+
+## Deploying to Modal
+
+Everything Modal-related in this repo is deployed the same way — the only
+difference is *who* runs the deploy command and what URL lands in `.env`.
+Modal is a hosting platform: when you deploy a function, Modal gives it a
+public HTTPS URL of the form
+`https://<your-workspace>--<app-name>-<function-name>.modal.run` and serves it
+for you. That URL is what the pipelines call; it is **not** a credential.
+
+### One-time: authenticate the Modal CLI
+
+```bash
+python -m modal token new        # or: python -m modal setup
+```
+
+This writes `~/.modal.toml` with your workspace token — every `modal` command
+from then on uses it. (The same step is required before `bash scripts/setup_modal.sh`.)
+
+### The `florence-api` secret (shared by all apps)
+
+All three Modal apps read the same Modal secret, `florence-api`, created by
+`setup_modal.sh` from the root `.env`:
+
+- `MODAL_API_SECRET` — random 32-byte hex, generated once with `openssl rand -hex 32`
+  (never printed, never committed)
+- `VISION_MODEL` — `florence-2-large` or `florence-2-base`
+
+The vLLM app exposes that same value to vLLM as `--api-key`, and the JS and
+Python clients send it as `Authorization: Bearer <MODAL_API_SECRET>` /
+`X-API-Secret: <MODAL_API_SECRET>`. So there is exactly one secret to manage.
+
+### What to deploy, in order
+
+| # | Command | What it does | `.env` variable it fills |
+|---|---|---|---|
+| 1 | `bash scripts/setup_modal.sh` | Creates `.venv`, checks Modal auth, creates `florence-api` (if missing), generates `MODAL_API_SECRET` (if empty) | reads/writes both above |
+| 2 | (same script, step 5) | Deploys `figure_extraction/florence.py` → greps URL | `MODAL_FLORENCE_URL` |
+| 3 | (same script, step 6) | Deploys `figure_extraction/florence_pdf.py` → greps URL | `MODAL_PDF_EXTRACT_URL` |
+| 4 | `python -m modal deploy modal/vllm_app.py` | Deploys the vLLM app (see below) — kept manual on purpose | `MODAL_ENDPOINT_URL` |
+
+`setup_modal.sh` is idempotent: existing secrets and URLs are kept, missing
+ones are filled in, and if a URL can't be parsed from the deploy log it tells
+you to paste it into `.env` manually. The vLLM app stays manual because its
+image bakes ~8 GB of model weights (build time + GPU bill) — it should be an
+explicit decision, not a surprise inside a setup script.
+
+If a deploy prints more than one `.modal.run` URL, the Florence apps are named
+`--florence2-figure-extractor-detect` / `--florence2-figure-extractor-healthz`
+and `--florence2-pdf-extractor-extract-pdf` / `...-healthz`; the vLLM app
+prints `--florence2-vllm-run` and `--florence2-vllm-healthz`.
+
+### Deploy and run `full-modal` (copy-paste)
+
+```bash
+# 0) one-time Modal auth (writes ~/.modal.toml with your workspace token)
+python -m modal token new
+
+# 1) deploy the Florence apps (fills MODAL_FLORENCE_URL / MODAL_PDF_EXTRACT_URL)
+bash scripts/setup_modal.sh
+
+# 2) deploy the vLLM app — one-time ~8 GB image bake (GPU is billed only while it runs)
+python -m modal deploy modal/vllm_app.py
+
+# 3) wire the printed URL into .env (replace the empty MODAL_ENDPOINT_URL= line)
+sed -i "s|^MODAL_ENDPOINT_URL=.*|MODAL_ENDPOINT_URL=<printed URL>|" .env
+
+# 4) smoke-test the instance itself
+curl -s https://<you>--florence2-vllm-healthz.modal.run
+curl -s https://<you>--florence2-vllm-run.modal.run/v1/chat/completions \
+  -H "Authorization: Bearer $MODAL_API_SECRET" -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3-VL-4B-Instruct",
+       "messages":[{"role":"user","content":[{"type":"text","text":"Say OK"}]}],
+       "max_tokens":8,"stream":false}'
+
+# 5) run the extraction against the instance
+node src/cli.js ./test.pdf --mode full-modal
+# outputs: out/test/manifest.json and out/test/run-report.json
+```
+
+Cost notes: step 2 builds/downloads once (slow first build; later deploys reuse
+cached layers). GPU billing starts only when the function runs; after
+`VLLM_SCALEDOWN_WINDOW` seconds idle (default 300) it scales to zero, and the
+next call cold-starts for ~1–3 minutes (be patient with the first `curl`).
+
+**Using this instance without the pipeline** — it is just an OpenAI-compatible
+server. Any OpenAI client works:
+
+```js
+import OpenAI from "openai";
+const client = new OpenAI({
+  baseURL: "https://<you>--florence2-vllm-run.modal.run/v1",
+  apiKey: process.env.MODAL_API_SECRET,
+});
+const resp = await client.chat.completions.create({
+  model: "Qwen/Qwen3-VL-4B-Instruct",
+  messages: [{ role: "user", content: "Say OK" }],
+  max_tokens: 8,
+  stream: false,
+});
+console.log(resp.choices[0].message.content);
+```
+
+If step 1 or 2 fails: see the **Troubleshooting** list in *The vLLM app — what
+you should know* below. Most first-time issues are (a) Modal CLI not
+authenticated (step 0), (b) the `vllm/vllm-openai` image tag not supporting the
+model architecture (bump `VLLM_IMAGE_TAG` in `modal/vllm_app.py`), or (c) GPU
+quota/availability on your plan.
+
+#### Full-Qwen Modal apps (`full-qwen-8b` / `full-qwen-27b`)
+
+Same pattern as the vLLM app above, but committed to one model per file. All
+three apps share the `florence-api` secret (same `MODAL_API_SECRET`).
+
+**`modal/full-qwen8b.py` → `qwen-8b` app (full-qwen-8b)**
+- Serves `Qwen/Qwen3-VL-8B-Instruct-FP8` on a **T4** by default (override the
+  GPU with `VLLM_GPU_8B` at deploy time)
+- Fits comfortably on a 16 GB T4; good general-purpose checkpoint for page JSON
+- Used by `node src/cli.js ./test.pdf --mode full-qwen-8b`
+- Deploy:
+  ```bash
+  set -a; source .env; set +a
+  python -m modal deploy modal/full-qwen8b.py
+  # then paste the printed URL into .env as MODAL_FULL_QWEN_8B_URL
+  ```
+
+**`modal/full-qwen27b.py` → `qwen-27b` app (full-qwen-27b)**
+- Serves `Qwen/Qwen3.8-27B-Instruct-FP8` on an **A100-40GB** by default
+  (override with `VLLM_GPU_27B` at deploy time — see `.env` / `.env.example`)
+- The strongest model this workspace can run — pick this if `qwen-8b` misses
+  table cells or leaves dense pages as stubs
+- Used by `node src/cli.js ./test.pdf --mode full-qwen-27b`
+- Deploy:
+  ```bash
+  set -a; source .env; set +a
+  python -m modal deploy modal/full-qwen27b.py
+  # then paste the printed URL into .env as MODAL_FULL_QWEN_27B_URL
+  ```
+
+Both apps bake the model into the image at build time (downloads once), expose
+a `/healthz` always-readiness endpoint, and scale to zero after
+`VLLM_SCALEDOWN_WINDOW` seconds idle.
+
+### The vLLM app (`modal/vllm_app.py`) — what you should know
+
+Serves **Qwen/Qwen3-VL-4B-Instruct** (override with `VLLM_MODEL`) through
+vLLM's OpenAI-compatible server. Used by the `full-modal` extraction mode.
+
+- **GPU**: needs a T4-class 16 GB card. Default `VLLM_GPU=T4` — the
+  4B bf16 weights (~8 GB) fit comfortably with `--enforce-eager`.
+  (On this workspace, L4/A10G instances were scheduling-blocked at deploy
+  time, so T4 — proven by the Florence apps — is the default.)
+- **Weights**: the image build downloads the model at build time (~8 GB;
+  first deploy is slow, later deploys reuse cached layers). No runtime
+  cache volume is mounted — it would shadow the baked weights.
+- **Scale-to-zero**: after `VLLM_SCALEDOWN_WINDOW` seconds idle (default 300)
+  the container scales down; the next call cold-starts in roughly 1–3 minutes.
+- **Auth**: vLLM runs with `--api-key $MODAL_API_SECRET`; `.env` needs
+  `MODAL_ENDPOINT_URL` (paste the URL the deploy prints).
+- **Smoke test**:
+
+```bash
+curl -s https://<you>--florence2-vllm-healthz.modal.run                # -> {"status":"ok"}
+curl -s https://<you>--florence2-vllm-run.modal.run/v1/chat/completions \
+  -H "Authorization: Bearer $MODAL_API_SECRET" -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3-VL-4B-Instruct",
+       "messages":[{"role":"user","content":[{"type":"text","text":"Say OK"}]}],
+       "max_tokens":8,"stream":false}'
+```
+
+| Env var (deploy) | Default | Purpose |
+|---|---|---|
+| `VLLM_MODEL` | `Qwen/Qwen3-VL-4B-Instruct` | Any model id vLLM supports (e.g. `Qwen/Qwen2.5-VL-7B-Instruct`) |
+| `VLLM_GPU` | `T4` | GPU class for the container |
+| `VLLM_SCALEDOWN_WINDOW` | `300` | Idle seconds before scale-to-zero |
+| `VLLM_MAX_MODEL_LEN` | `16384` | Context length cap |
+
+Troubleshooting: **401** → `.env` `MODAL_API_SECRET` ≠ `florence-api` secret
+(recreate the secret: `python -m modal secret delete florence-api`, re-run
+`setup_modal.sh`). **CUDA OOM** → lower `VLLM_MAX_MODEL_LEN`, or
+`VLLM_GPU=T4`. **Very slow first deploy** → image build downloads ~8 GB,
+normal. **Model architecture not supported** → bump `VLLM_IMAGE_TAG` in
+`vllm_app.py` to a newer vLLM release.
+
+**Status**: not yet deployed/verified end-to-end — it will be once you run step 4
+and `node src/cli.js ./test.pdf --mode full-modal`.
+
+### Verifying everything is wired up
+
+```bash
+curl -s $MODAL_FLORENCE_URL/healthz        # -> {"status":"ok"}
+curl -s ${MODAL_PDF_EXTRACT_URL}/healthz   # -> {"status":"ok"} (after step 3/6)
+python -m figure_extraction.pipeline ./test.pdf
+python -m figure_extraction.pdf_to_json ./test.pdf --out ./test.pdf.json --debug
+```
 
 ## How Florence-2 is used, and how outputs become crops + filenames
 

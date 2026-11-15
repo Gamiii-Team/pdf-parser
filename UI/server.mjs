@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // UI/server.mjs — localhost-only UI for the document→JSON pipeline.
 // Reuses extractDocument() as-is; all output stays under out/ui/.
+// Run folders are self-describing:
+//   <runId>_<inputSlug>_<backend>-<modelSlug>  (see src/util/runName.js)
 // Nothing here filters model errors — raw messages are returned to the UI.
 
-import crypto from "node:crypto";
 import express from "express";
 import multer from "multer";
 import fs from "node:fs";
@@ -14,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { extractDocument } from "../src/extractDocument.js";
 import { config, missingFor, MAX_PAGES } from "../src/config.js";
 import { createLogger } from "../src/util/log.js";
+import { genRunId, formatRunFolder } from "../src/util/runName.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, "..");
@@ -36,9 +38,6 @@ fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // ---------- helpers ----------
-const genRunId = () => crypto.randomBytes(8).toString("hex");
-const safeName = (n) => String(n || "input").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
-
 function readJsonSafe(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
 }
@@ -49,28 +48,34 @@ function listRuns() {
   try { entries = fs.readdirSync(OUT_DIR, { withFileTypes: true }); } catch { return out; }
   for (const e of entries) {
     if (!e.isDirectory()) continue;
-    const id = e.name.split("_")[0];
-    if (!RUNS_ID.test(id)) continue;
     const dir = path.join(OUT_DIR, e.name);
     const manifest = readJsonSafe(path.join(dir, "manifest.json"));
     if (!manifest) continue;
     const report = readJsonSafe(path.join(dir, "run-report.json"));
     const meta = readJsonSafe(path.join(dir, "ui-meta.json"));
-    if (meta) {
+    if (meta && meta.runId) {
       out.push(meta);
-    } else {
-      out.push({
-        runId: id,
-        created: 0,
-        input: path.basename(manifest.source_file ?? e.name),
-        backend: "unknown",
-        pages: manifest.pages ?? null,
-        sections: null,
-        tokens: null,
-        duration_ms: report?.duration_ms ?? null,
-        dir: dir,
-      });
+      continue;
     }
+    // No ui-meta.json: derive a run id from the folder name — leading segment
+    // for the current scheme (<runId>_<input>_<backend>-<model>), trailing segment for the
+    // short-lived timestamped scheme (<ts>_..._<runId>).
+    const segments = e.name.split("_").filter(Boolean);
+    const derived = RUNS_ID.test(segments[segments.length - 1]) ? segments[segments.length - 1]
+      : RUNS_ID.test(segments[0]) ? segments[0]
+      : null;
+    if (!derived) continue;
+    out.push({
+      runId: derived,
+      created: 0,
+      input: path.basename(manifest.source_file ?? e.name),
+      backend: "unknown",
+      pages: manifest.pages ?? null,
+      sections: null,
+      tokens: null,
+      duration_ms: report?.duration_ms ?? null,
+      dir: dir,
+    });
   }
   out.sort((a, b) => (b.created ?? 0) - (a.created ?? 0));
   return out;
@@ -79,8 +84,20 @@ function listRuns() {
 function findRunDir(runId) {
   if (!RUNS_ID.test(runId)) return null;
   const entries = fs.readdirSync(OUT_DIR, { withFileTypes: true });
+  // Timestamped scheme (briefly used): runId is the trailing segment.
   for (const e of entries) {
-    if (e.isDirectory() && e.name.startsWith(runId + "_")) return path.join(OUT_DIR, e.name);
+    if (e.isDirectory() && e.name.endsWith(`_${runId}`)) return path.join(OUT_DIR, e.name);
+  }
+  // Current and original legacy scheme: runId is the leading segment.
+  for (const e of entries) {
+    if (e.isDirectory() && e.name.startsWith(`${runId}_`)) return path.join(OUT_DIR, e.name);
+  }
+  // Fallback: match on ui-meta.json contents.
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const dir = path.join(OUT_DIR, e.name);
+    const meta = readJsonSafe(path.join(dir, "ui-meta.json"));
+    if (meta?.runId === runId) return dir;
   }
   return null;
 }
@@ -169,8 +186,23 @@ app.post("/api/analyze", upload.single("file"), async (req, res) => {
     const bool = (v, fallback) => v == null ? fallback : v === true || v === "true";
     const modelBackend = ["groq", "modal"].includes(String(body.modelBackend)) ? String(body.modelBackend) : undefined;
 
+    const activeBackend = modelBackend ?? config.modelBackend;
+    const activeModel = activeBackend === "groq" ? config.groqModel : config.modalModel;
+    // For uploads pdfPath is a multer temp path with a random name — the client's
+    // original filename is what belongs in the folder name and ui-meta.json.
+    // Demos use their registry name instead.
+    const inputName = demo
+      ? path.basename(DEMOS[demo]?.name ?? demo)
+      : (req.file?.originalname ?? path.basename(pdfPath ?? "input"));
+
     const runId = genRunId();
-    const outName = `${runId}_${safeName(path.basename(pdfPath).replace(/\.[^.]+$/, ""))}`;
+    const created = Date.now();
+    const outName = formatRunFolder({
+      backend: activeBackend,
+      model: activeModel,
+      inputName,
+      runId,
+    });
     const outDir = path.join(OUT_DIR, outName);
 
     const logger = createLogger({ silent: true });
@@ -178,6 +210,7 @@ app.post("/api/analyze", upload.single("file"), async (req, res) => {
       out: outDir,
       logger,
       modelBackend,
+      runId,
       forceVlm: bool(body.forceVlm, false),
       subject: typeof body.subject === "string" && body.subject.trim() ? body.subject.trim() : undefined,
       subjectDetect: bool(body.subjectDetect, true),
@@ -186,10 +219,12 @@ app.post("/api/analyze", upload.single("file"), async (req, res) => {
 
     fs.writeFileSync(path.join(outDir, "ui-meta.json"), JSON.stringify({
       runId,
-      created: Date.now(),
-      input: path.basename(pdfPath),
-      backend: modelBackend ?? config.modelBackend,
-      model: (modelBackend ?? config.modelBackend) === "groq" ? config.groqModel : config.modalModel,
+      created,
+      input: inputName,
+      source: demo ? "demo" : "upload",
+      demo: demo ?? null,
+      backend: activeBackend,
+      model: activeModel,
       pages: manifest.pages,
       sections: null,
       tokens: { input: report.total_tokens_input, output: report.total_tokens_output },

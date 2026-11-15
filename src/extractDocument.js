@@ -22,6 +22,7 @@ import { makeProvider } from "./providers/index.js";
 import { createLogger } from "./util/log.js";
 import { resolveSubject } from "./extract/subject.js";
 import { validateTextCoverage, validateCharts, validateTables } from "./validate/index.js";
+import { genRunId, formatRunFolder } from "./util/runName.js";
 
 const DEFAULT_MODELS = {
   groq: "qwen/qwen3.8-27b",
@@ -29,15 +30,17 @@ const DEFAULT_MODELS = {
 };
 
 export async function extractDocument(input, options = {}) {
-  const missing = missingFor({ modelBackend: options.modelBackend ?? options.model ?? config.modelBackend });
+  const backend = options.modelBackend ?? options.model ?? config.modelBackend;
+  const model = backend === "groq" ? config.groqModel : backend === "modal" ? config.modalModel : "";
+  const runId = options.runId ?? genRunId();
+
+  const missing = missingFor({ modelBackend: backend });
   if (missing.length) {
-    throw new Error(`Missing configuration for ${options.modelBackend ?? config.modelBackend}: ${missing.join(", ")}`);
+    throw new Error(`Missing configuration for ${backend}: ${missing.join(", ")}`);
   }
 
   const logger = options.logger ?? createLogger();
-  const provider = (options.modelBackend ?? options.model ?? config.modelBackend) && (options.modelBackend ?? options.model ?? config.modelBackend) !== "none"
-    ? makeProvider(options.modelBackend ?? options.model ?? config.modelBackend)
-    : null;
+  const provider = backend && backend !== "none" ? makeProvider(backend) : null;
 
   const t0 = Date.now();
   const { pdfPath, analysis, cleanupPath } = await normalizeInput(input);
@@ -122,7 +125,12 @@ export async function extractDocument(input, options = {}) {
 
   // ---------- 6) Write output ----------
   if (cleanupPath) { try { fs.unlinkSync(cleanupPath); } catch {} }
-  const outDir = path.resolve(options.out ?? path.join(config.outputDir, path.basename(input, path.extname(input))));
+  const outDir = path.resolve(options.out ?? path.join(config.outputDir, "cli", formatRunFolder({
+    backend,
+    model,
+    inputName: path.basename(input),
+    runId,
+  })));
   fs.mkdirSync(outDir, { recursive: true });
   const manifestPath = path.join(outDir, "manifest.json");
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
@@ -131,6 +139,7 @@ export async function extractDocument(input, options = {}) {
   const tokensOut = tokens.output;
 
   const report = {
+    run_id: runId,
     source_file: path.resolve(input),
     duration_ms: Date.now() - t0,
     pages: manifest.pages,
@@ -147,7 +156,7 @@ export async function extractDocument(input, options = {}) {
   };
   fs.writeFileSync(path.join(outDir, "run-report.json"), JSON.stringify(report, null, 2));
 
-  return { manifest, manifestPath, outDir, report };
+  return { manifest, manifestPath, outDir, report, runId };
 }
 
 function countSections(sections) {

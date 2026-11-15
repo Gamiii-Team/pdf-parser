@@ -118,7 +118,7 @@ Supported inputs:
 Examples:
 
 ```bash
-node src/cli.js test.pdf                              # full pipeline → out/test/manifest.json
+node src/cli.js test.pdf                              # full pipeline → out/cli/<generated-name>/manifest.json
 node src/cli.js test.pdf --no-figure-pass             # offline smoke test, no model calls
 node src/cli.js fixtures/scanned.pdf                  # scanned pages route through the VLM path
 node src/cli.js fixtures/page-one.png                 # image inputs work too
@@ -134,6 +134,33 @@ Output:
 <out>/run-report.json    # timing, token counts, validation details
 ```
 
+Run folders are **self-describing** — the name tells you what produced the run:
+
+```
+<runId>_<input>_<backend>-<model>
+```
+
+- `<runId>` — 16 hex chars; keeps same-second runs of the same file unique
+- `<input>` — the input file name without extension
+- `<backend>-<model>` — e.g. `groq-qwen3.8-27b` or `modal-qwen3-vl-8b-instruct-fp8`
+  (org prefix of the model id is dropped; `none` when running with `--model none`)
+
+Examples:
+
+```
+out/cli/d72eb07eb531ef18_test_none/
+out/ui/0b671f7bee35e952_test_groq-qwen3.8-27b/
+out/ui/9f8e7d6c5b4a3210_invoice-42_modal-qwen3-vl-8b-instruct-fp8/
+```
+
+CLI runs land under `out/cli/`, UI runs under `out/ui/`. Folder names no longer
+sort chronologically — use the run history sidebar (sorted by `ui-meta.json`
+`created`) or `ls -t`. Whether a UI run came from a demo or a real upload is
+recorded as `source` / `demo` inside `ui-meta.json`.
+
+`run-report.json` also carries the same `run_id`. `--out <dir>` (or `options.out`)
+overrides the generated folder name entirely.
+
 ## Run the UI
 
 ```bash
@@ -148,7 +175,8 @@ backend (Groq vs Modal vLLM), optionally set a subject, toggle figure analysis,
 figure VLM forcing, and auto-subject. Results render the full tree: headings as
 nested sections, lists as real lists, tables as real `<table>`s, bar/line/pie
 charts as inline SVG. `manifest.json` / `run-report.json` download from the
-toolbar; runs persist in `out/ui/` and show up in the run history sidebar.
+toolbar; runs persist in `out/ui/` under self-describing folder names (see
+[Output](#output)) and show up in the run history sidebar.
 
 Deep links: `http://127.0.0.1:3040/?run=test.pdf` auto-runs a demo on page load.
 
@@ -165,7 +193,7 @@ your model quota — never expose the port, and never commit `.env`.
 | Item       | Where                            | Notes                                                 |
 | ---------- | -------------------------------- | ----------------------------------------------------- |
 | config     | `.env` in repo root              | `GROQ_API_KEY`, `VLM_BACKEND`, optional `VLLM_*`      |
-| run data   | `out/ui/`                        | all history/past runs — treat as private working data |
+| run data   | `out/ui/`                        | UI runs (self-describing folder names) — treat as private working data; CLI runs go to `out/cli/` |
 | stop       | Ctrl-C                           |                                                       |
 | background | `nohup npm start >ui.log 2>&1 &` | no systemd unit ships — ops choice is yours           |
 
@@ -237,7 +265,7 @@ See also [`.env.example`](.env.example). Required for the default setup: `GROQ_A
 | `VLLM_MODEL`                                           | no          | `Qwen/Qwen3-VL-8B-Instruct-FP8` | must match `--served-model-name`                    |
 | `MIN_CHARS_TEXT_LAYER`                                 | no          | `80`                            | text-layer vs VLM route threshold                   |
 | `DPI` / `CROP_DPI`                                     | no          | `170` / `200`                   | page render / figure crop DPI                       |
-| `OUTPUT_DIR`                                           | no          | `out`                           | UI runs land under `out/ui/`                        |
+| `OUTPUT_DIR`                                           | no          | `out`                           | UI runs land under `out/ui/`, CLI runs under `out/cli/` (self-describing names) |
 | `PRICE_PER_M_INPUT_TOKEN` / `PRICE_PER_M_OUTPUT_TOKEN` | no          | `0`                             | cost accounting hooks                               |
 
 ## Output schema (summary)

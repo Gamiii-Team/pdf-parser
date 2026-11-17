@@ -12,9 +12,13 @@ export function buildTree(flatBlocks, opts = {}) {
   const sectionId = () => `s${String(++_sid).padStart(3, "0")}`;
   const blockId = () => `b${String(++_bid).padStart(3, "0")}`;
 
-  const sorted = [...flatBlocks].sort(
-    (a, b) => (a.page - b.page) || ((a.bbox?.[1] ?? 0) - (b.bbox?.[1] ?? 0)) || ((a.bbox?.[0] ?? 0) - (b.bbox?.[0] ?? 0)),
-  );
+  // Sort by page only (stable): intra-page order = input order, which puts the
+  // span-derived blocks first and lets VLM-appended blocks trail them.
+  // (Previously y-coordinate sorted null-bbox VLM blocks as y=0, ahead of all
+  // span content — chart blocks jumped their own heading.)
+  const sorted = [...flatBlocks].map((block, index) => ({ block, index }))
+    .sort((a, b) => (a.block.page - b.block.page) || (a.index - b.index))
+    .map(({ block }) => block);
 
   const sections = [];
   const stack = [];

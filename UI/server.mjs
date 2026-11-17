@@ -26,13 +26,47 @@ const UPLOAD_DIR = path.resolve(REPO, config.outputDir, ".ui-uploads");
 const PORT = Number(process.env.PORT) || 3040;
 const HOST = "127.0.0.1"; // hard-coded: single-user machine only
 
-const SUPPORTED_EXTS = new Set([".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"]);
+const SUPPORTED_EXTS = new Set([".pdf", ".pptx", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"]);
 const RUNS_ID = /^[0-9a-f]{8,20}$/;
 
 const DEMOS = {
   "test.pdf": { path: path.join(REPO, "test.pdf"), name: "test.pdf", kind: "born-digital", tokens: "free (text-layer) + optional model calls" },
   "fixtures/scanned.pdf": { path: path.join(REPO, "fixtures", "scanned.pdf"), name: "scanned.pdf", kind: "scanned", tokens: "calls VLM — costs tokens" },
+  "fixtures/sample.pptx": { path: path.join(REPO, "fixtures", "sample.pptx"), name: "sample.pptx", kind: "pptx", tokens: "LibreOffice conversion, then text-layer + optional model calls" },
 };
+
+// ---------- in-memory job status (for a future async UI) ----------
+// /api/analyze today is synchronous (the UI expects the manifest inline). The
+// job record exists so a future async UI can poll these endpoints without
+// reworking the API surface. Stages: queued → converting → analyzing → done | failed.
+const JOBS_TTL_MS = 60 * 60 * 1000;
+const JOBS_MAX = 200;
+const jobs = new Map(); // jobId → job
+
+function sweepJobs() {
+  const cutoff = Date.now() - JOBS_TTL_MS;
+  for (const [id, j] of jobs) {
+    if (j.updated < cutoff) jobs.delete(id);
+  }
+  while (jobs.size > JOBS_MAX) {
+    let oldestId = null, oldestAt = Infinity;
+    for (const [id, j] of jobs) if (j.created < oldestAt) { oldestAt = j.created; oldestId = id; }
+    if (oldestId == null) break;
+    jobs.delete(oldestId);
+  }
+}
+
+function createJob(input, source) {
+  sweepJobs();
+  const job = { id: genRunId(), input, source, status: "queued", stage: null, created: Date.now(), updated: Date.now(), error: null, runId: null };
+  jobs.set(job.id, job);
+  return job;
+}
+
+function setJob(job, patch) {
+  if (!job) return;
+  Object.assign(job, patch, { updated: Date.now() });
+}
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -108,7 +142,15 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 
 const upload = multer({
-  dest: UPLOAD_DIR,
+  storage: multer.diskStorage({
+    destination: UPLOAD_DIR,
+    filename(_req, file, cb) {
+      // multer's default random name loses the extension — but the pipeline
+      // routes on path.extname(pdfPath), so keep it (sanitized).
+      const ext = path.extname(file.originalname ?? "").toLowerCase().replace(/[^a-z0-9.]/g, "");
+      cb(null, `${genRunId()}${ext}`);
+    },
+  }),
   limits: { fileSize: 50 * 1024 * 1024, files: 1 },
   fileFilter(_req, file, cb) {
     const ext = path.extname(file.originalname ?? "").toLowerCase();
@@ -162,6 +204,7 @@ app.get("/api/demos", (_req, res) => {
 app.post("/api/analyze", upload.single("file"), async (req, res) => {
   let pdfPath = null;
   let cleanupPath = null;
+  let job = null;
   try {
     const body = req.body ?? {};
     const demo = typeof body.demo === "string" ? body.demo.trim() : null;
@@ -205,12 +248,16 @@ app.post("/api/analyze", upload.single("file"), async (req, res) => {
     });
     const outDir = path.join(OUT_DIR, outName);
 
+    job = createJob(inputName, demo ? "demo" : "upload");
+    setJob(job, { status: "running", stage: "queued" });
+
     const logger = createLogger({ silent: true });
     const { manifest, report } = await extractDocument(pdfPath, {
       out: outDir,
       logger,
       modelBackend,
       runId,
+      onStage: (stage) => setJob(job, { stage }),
       forceVlm: bool(body.forceVlm, false),
       subject: typeof body.subject === "string" && body.subject.trim() ? body.subject.trim() : undefined,
       subjectDetect: bool(body.subjectDetect, true),
@@ -233,10 +280,17 @@ app.post("/api/analyze", upload.single("file"), async (req, res) => {
       dir: outDir,
     }, null, 2));
 
-    res.json({ ok: true, runId, manifest, report, outDir });
+    setJob(job, { status: "done", stage: "done", runId });
+    res.json({ ok: true, runId, manifest, report, outDir, jobId: job.id });
   } catch (err) {
-    // No filtering: return the raw error, the UI renders it verbatim.
-    res.status(500).json({ error: String(err?.message ?? err), stack: String(err?.stack ?? "") });
+    if (job) setJob(job, { status: "failed", error: String(err?.message ?? err) });
+    const isInputErr = err?.code === "PPTX_INVALID" || err?.code === "PPTX_CONVERT_FAILED";
+    const status = isInputErr ? 400 : 500;
+    // No filtering of 500s: raw error goes to the UI. 400s are friendly validation/conversion messages.
+    const payload = isInputErr
+      ? { error: String(err?.message ?? err), jobId: job?.id }
+      : { error: String(err?.message ?? err), stack: String(err?.stack ?? ""), jobId: job?.id };
+    res.status(status).json(payload);
   } finally {
     if (cleanupPath) { try { fs.unlinkSync(cleanupPath); } catch {} }
   }
@@ -270,6 +324,18 @@ app.delete("/api/runs/:id", (req, res) => {
   if (!resolved.startsWith(OUT_DIR + path.sep)) return res.status(500).json({ error: "path safety check failed" });
   fs.rmSync(resolved, { recursive: true, force: true });
   res.json({ ok: true });
+});
+
+app.get("/api/jobs", (_req, res) => {
+  sweepJobs();
+  res.json({ jobs: [...jobs.values()].sort((a, b) => b.created - a.created) });
+});
+
+app.get("/api/jobs/:id", (req, res) => {
+  sweepJobs();
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "job not found" });
+  res.json({ job });
 });
 
 app.listen(PORT, HOST, () => {

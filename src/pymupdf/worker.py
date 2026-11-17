@@ -276,6 +276,37 @@ def cmd_images_to_pdf(image_paths, out_path):
     doc.save(out_path)
 
 
+def cmd_hide_empty_slides(src_path, dst_path):
+    """Mark empty slides (no shapes) as hidden (show="0") in a COPY of the deck.
+
+    LibreOffice skips hidden slides when exporting to PDF, so empty slides are
+    never rendered — and never cost a VLM call. The original file is never
+    touched: the caller converts a copy, not the upload.
+    """
+    import re
+    import zipfile
+
+    slide_re = re.compile(r"^ppt/slides/slide\d+\.xml$", re.IGNORECASE)
+    shape_re = re.compile(r"<p:(sp|pic|graphicFrame|grpSp|cxnSp|contentPart)\b")
+    hidden_re = re.compile(r"<p:sld\b[^>]*\bshow\s*=\s*[\"']0[\"']", re.IGNORECASE)
+
+    with zipfile.ZipFile(src_path, "r") as zin:
+        entries = [(info, zin.read(info.filename)) for info in zin.infolist()]
+
+    hidden_count = 0
+    with zipfile.ZipFile(dst_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info, data in entries:
+            if slide_re.match(info.filename):
+                text = data.decode("utf-8", errors="ignore")
+                if not hidden_re.search(text) and not shape_re.search(text):
+                    text = re.sub(r"<p:sld\b", '<p:sld show="0" ', text, count=1)
+                    data = text.encode("utf-8")
+                    hidden_count += 1
+            zout.writestr(info, data)
+
+    print(json.dumps({"ok": True, "hidden": hidden_count}))
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -307,6 +338,10 @@ def main():
     pm.add_argument("out_path")
     pm.add_argument("images", nargs="+")
 
+    ph = sub.add_parser("hide-empty-slides")
+    ph.add_argument("src_pptx")
+    ph.add_argument("dst_pptx")
+
     ns = p.parse_args()
 
     if ns.cmd == "analyze":
@@ -319,6 +354,8 @@ def main():
         cmd_image_to_pdf(ns.image, ns.out_path)
     elif ns.cmd == "images-to-pdf":
         cmd_images_to_pdf(ns.images, ns.out_path)
+    elif ns.cmd == "hide-empty-slides":
+        cmd_hide_empty_slides(ns.src_pptx, ns.dst_pptx)
 
 
 if __name__ == "__main__":

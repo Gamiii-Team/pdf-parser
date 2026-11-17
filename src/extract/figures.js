@@ -49,12 +49,13 @@ function loadPrompt() {
  * @returns {Promise<Array<object>>} figure blocks with content/table/chart fields
  */
 export async function analyzeFigures(figureBlocks, { pdfPath, provider, logger, maxDim }) {
-  // Returns { figures, usage }.
+  // Returns { figures, usage, errors }.
   const tmpDir = path.join(os.tmpdir(), `docv2-fig-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   fs.mkdirSync(tmpDir, { recursive: true });
   const prompt = loadPrompt();
   const out = [];
   const usage = { input: 0, output: 0 };
+  const errors = [];
 
   for (const figure of figureBlocks) {
     const ff = { ...figure };
@@ -90,8 +91,9 @@ export async function analyzeFigures(figureBlocks, { pdfPath, provider, logger, 
       logger?.warn?.(`figure pass failed on page ${figure.page}: ${err.message}`);
       ff.needs_review = true;
       ff.notes = `figure_pass_failed: ${err.message}`;
+      errors.push(`page ${figure.page}: ${err.message}`);
     }
     out.push(ff);
   }
-  return { figures: out, usage };
+  return { figures: out, usage, errors };
 }

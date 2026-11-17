@@ -315,7 +315,7 @@ function renderChartBlock(block) {
     fig.appendChild(el("p", "chart-empty", "no structured data extracted — figure is decorative or unreadable"));
   }
   if (block.description) fig.appendChild(el("p", "chart-desc", block.description));
-  if (block.needs_review) needsReviewNote(fig);
+  if (block.needs_review) needsReviewNote(fig, block.notes ?? null);
   return fig;
 }
 
@@ -386,6 +386,32 @@ function setOutput(manifest, report, meta) {
     band.appendChild(chip);
   }
   if (nr > 0) band.appendChild(el("span", "chip", `needs_review × ${nr}`));
+
+  // pptx-only: visible vs skipped (hidden/empty) slides, and analysis error count
+  if (report?.pptx && typeof report.pptx === "object") {
+    const { total, visible } = report.pptx;
+    const skipped = (total ?? 0) - (visible ?? 0);
+    if (skipped > 0) {
+      const skipChip = el("span", "chip", `slides ${visible}/${total} — ${skipped} skipped (hidden/empty)`);
+      skipChip.setAttribute("title", "Hidden and empty slides are never rendered into the PDF — they are not counted in pages.");
+      band.appendChild(skipChip);
+    }
+  }
+  const errLists = report?.errors ?? {};
+  const errMsgs = Object.entries(errLists).flatMap(([k, v]) => (Array.isArray(v) ? v.map((m) => `[${k}] ${m}`) : []));
+  if (errMsgs.length > 0) {
+    const errChip = el("span", "chip chip-warn", `⚠ errors × ${errMsgs.length}`);
+    errChip.setAttribute("title", errMsgs.join("\n"));
+    band.appendChild(errChip);
+  }
+  const cov = report?.validation?.text_coverage ?? [];
+  if (Array.isArray(cov) && cov.length) {
+    const worst = Math.min(...cov.map((c) => Number(c?.coverage) || 0));
+    const allOk = cov.every((c) => c?.ok !== false);
+    const covChip = el("span", `chip ${allOk ? "chip-ok" : "chip-warn"}`, `coverage <b>${Math.round(worst * 100)}%</b>`);
+    covChip.setAttribute("title", cov.map((c) => `page ${c.page}: ${Math.round((Number(c?.coverage) || 0) * 100)}%${c.ok ? "" : " — under-covered (content may be missing — check the VLM notes)"}`).join("\n"));
+    band.appendChild(covChip);
+  }
 
   // tabs
   $("#raw-pre").textContent = JSON.stringify(manifest, null, 2);
@@ -541,9 +567,9 @@ function timeAgo(ms) {
   return new Date(ms).toLocaleDateString();
 }
 
-// deep link: /?run=test.pdf or /?run=fixtures/scanned.pdf pre-selects the demo (no auto-run — it spends tokens)
+// deep link: /?run=test.pdf, ?run=fixtures/scanned.pdf or ?run=fixtures/sample.pptx pre-selects the demo (no auto-run — it spends tokens)
 const deepRun = new URLSearchParams(location.search).get("run");
-if (deepRun === "test.pdf" || deepRun === "fixtures/scanned.pdf") {
+if (deepRun === "test.pdf" || deepRun === "fixtures/scanned.pdf" || deepRun === "fixtures/sample.pptx") {
   setDemo(deepRun);
   toast(`demo armed: ${deepRun} — press Analyze`);
 }

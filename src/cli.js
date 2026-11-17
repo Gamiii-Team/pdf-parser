@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // src/cli.js
 // CLI: node src/cli.js <file> [options]
-//   <file>                PDF, scanned PDF, or image (png/jpg/tiff/webp/bmp) — wrapped as a 1-page PDF
+//   <file>                PDF, PPTX (converted via LibreOffice in Docker), scanned PDF, or image (png/jpg/tiff/webp/bmp)
 //   --subject "..."       document subject (skips LLM subject detection)
 //   --model groq|modal    VLM backend (default: $VLM_BACKEND or "groq")
 //   --no-figure-pass      skip VLM figure analysis (offline mode; charts stay type:"chart" with null content)
@@ -38,7 +38,7 @@ function parseArgs(argv) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help || opts.positional.length === 0) {
-    console.log(`Usage: node src/cli.js <file> [options]\n\n  <file>                PDF, scanned PDF, or image (.png/.jpg/.jpeg/.tif/.tiff/.webp/.bmp)\n\nOptions:\n  --subject "..."       Document subject (skips LLM subject detection)\n  --model groq|modal    VLM backend (default: $VLM_BACKEND, fallback groq)\n  --no-figure-pass      Skip VLM figure analysis (charts keep content:null)\n  --no-subject-detect   Skip LLM subject detection\n  --force-vlm           Force every page through the VLM path\n  --out <dir>           Output directory (default: out/cli/<generated-name>/)\n  --pretty              Print the manifest to stdout as well`);
+    console.log(`Usage: node src/cli.js <file> [options]\n\n  <file>                PDF, .pptx (LibreOffice conversion), scanned PDF, or image (.png/.jpg/.jpeg/.tif/.tiff/.webp/.bmp)\n\nOptions:\n  --subject "..."       Document subject (skips LLM subject detection)\n  --model groq|modal    VLM backend (default: $VLM_BACKEND, fallback groq)\n  --no-figure-pass      Skip VLM figure analysis (charts keep content:null)\n  --no-subject-detect   Skip LLM subject detection\n  --force-vlm           Force every page through the VLM path\n  --out <dir>           Output directory (default: out/cli/<generated-name>/)\n  --pretty              Print the manifest to stdout as well`);
     process.exit(opts.help ? 0 : 1);
   }
   const input = opts.positional[0];

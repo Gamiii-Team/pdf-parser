@@ -200,6 +200,33 @@ function emitTables(pages, rawWithIdx) {
   return { tableBlocks: out, usedIdx };
 }
 
+// Merge cluster of nearby vector drawings (bars, axes, gridlines, legends of
+// ONE chart share a page and are usually within ~36pt of each other) into a
+// single figure region — one crop, one caption, one enrichment call.
+const VECTOR_MERGE_MARGIN = 36;
+const bboxesNear = (a, b) =>
+  a[0] - VECTOR_MERGE_MARGIN <= b[2] && b[0] - VECTOR_MERGE_MARGIN <= a[2] &&
+  a[1] - VECTOR_MERGE_MARGIN <= b[3] && b[1] - VECTOR_MERGE_MARGIN <= a[3];
+export function clusterVectorBoxes(boxes) {
+  const remaining = [...boxes];
+  const clusters = [];
+  while (remaining.length) {
+    const cluster = [remaining.pop()];
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let i = remaining.length - 1; i >= 0; i--) {
+        if (cluster.some((c) => bboxesNear(c, remaining[i]))) {
+          cluster.push(remaining.splice(i, 1)[0]);
+          changed = true;
+        }
+      }
+    }
+    clusters.push(mergeBBox(cluster));
+  }
+  return clusters;
+}
+
 /** Phase 4: detect figure/image regions; mark matching captions as used. */
 function emitFigures(pages, rawWithIdx, tableBlocks, tableUsedIdx) {
   const out = [];
@@ -233,10 +260,15 @@ function emitFigures(pages, rawWithIdx, tableBlocks, tableUsedIdx) {
         caption: findCaption({ bbox: b, page: page.page }),
       });
     }
+    const vectorBoxes = [];
     for (const d of page?.drawings ?? []) {
       const b = clampBBox(d.bbox);
       if ((b[2] - b[0]) < 40 || (b[3] - b[1]) < 40) continue;
       if (coversMostOfPage(b, page)) continue;
+      if (overlapsAnyTable(b, tableBlocks)) continue;
+      vectorBoxes.push(b);
+    }
+    for (const b of clusterVectorBoxes(vectorBoxes)) {
       if (overlapsAnyTable(b, tableBlocks)) continue;
       out.push({
         type: "figure-vector",

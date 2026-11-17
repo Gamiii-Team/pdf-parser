@@ -50,6 +50,6 @@ export async function resolveSubject(subject, { blocks, provider, logger } = {})
     return { subject: "unknown", subject_source: "unavailable", usage };
   } catch (err) {
     logger?.warn?.(`subject detection failed: ${err.message}`);
-    return { subject: "unknown", subject_source: "unavailable" };
+    return { subject: "unknown", subject_source: "unavailable", error: err.message };
   }
 }

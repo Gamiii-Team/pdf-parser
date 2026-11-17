@@ -1,6 +1,6 @@
 # pdf-parser
 
-**Document → structured JSON** for born-digital PDFs, scanned PDFs, and image files. Extracts the complete text content, tables (as cell grids), and figures/charts (as structured data) and emits a recursive `sections[]` tree intended to be consumed by a language model.
+**Document → structured JSON** for born-digital PDFs, scanned PDFs, PowerPoint decks, and image files. Extracts the complete text content, tables (as cell grids), and figures/charts (as structured data) and emits a recursive `sections[]` tree intended to be consumed by a language model.
 
 No Florence-2, no chunking, no markdown strings: tables and charts are structured data throughout.
 
@@ -11,7 +11,7 @@ No Florence-2, no chunking, no markdown strings: tables and charts are structure
 | `src/cli.js`             | CLI entry                                                                              |
 | `src/extractDocument.js` | Orchestrator (normalize → route → extract → tree → validate → write)                   |
 | `src/pymupdf/`           | Python worker: page analysis, table finding, image wraps, renders/crops                |
-| `src/input/`             | Input normalization (PDF wrap / image→PDF / PPTX rejected) + per-page routing          |
+| `src/input/`             | Input normalization (PDF wrap / PPTX→PDF via locked-down LibreOffice container / image→PDF) + per-page routing |
 | `src/extract/`           | text-layer extractor, VLM page path, figure analyzer, tree builder                     |
 | `src/validate/`          | Offline validators (text coverage, chart sanity, table sanity)                         |
 | `src/providers/`         | VLM backends (`groq` default, `modal` OpenAI-compatible vLLM)                          |
@@ -19,12 +19,16 @@ No Florence-2, no chunking, no markdown strings: tables and charts are structure
 | `test.pdf`               | Born-digital fixture (committed)                                                       |
 | `fixtures/scanned.pdf`   | Image-only fixture (generated from `test.pdf` at 150 dpi)                              |
 | `fixtures/page-one.png`  | Single-image fixture                                                                   |
+| `fixtures/sample.pptx`   | PowerPoint fixture (3 visible slides + 1 hidden + 1 empty; PyMuPDF-drawn readable bar chart) |
+| `docker/converter/`      | Locked-down LibreOffice container that converts .pptx → PDF                            |
+| `compose.converter.yaml` | Optional manual runner for the converter (the pipeline spawns `docker run` directly)   |
 
 ## Requirements
 
 - Node.js ≥ 20 (ESM, no build step)
 - Python 3 + [PyMuPDF](https://pymupdf.io/) — bootstrapped via `npm run setup`, documented in `requirements.txt`
 - GROQ_API_KEY (default backend) or a Modal-hosted vLLM endpoint (`VLM_BACKEND=modal`)
+- **Docker** (for `.pptx` input only): the converter runs LibreOffice headless inside a locked-down container. Host mode is supported as an escape hatch (see below)
 
 ```bash
 npm install
@@ -112,8 +116,9 @@ node src/cli.js <file> [--out <dir>] [options]
 Supported inputs:
 
 - `.pdf` (born-digital or scanned)
+- `.pptx` (PowerPoint — converted to PDF by LibreOffice in Docker, then processed like any other PDF; see [PowerPoint support](#powerpoint-pptx-support))
 - images: `.png .jpg .jpeg .tif .tiff .webp .bmp` (wrapped as a 1-page PDF)
-- PPTX is **not** supported — export to PDF first.
+- PPTX decks only: `.ppt` (legacy binary) is **not** supported — re-save as `.pptx` first.
 
 Examples:
 
@@ -122,6 +127,7 @@ node src/cli.js test.pdf                              # full pipeline → out/cl
 node src/cli.js test.pdf --no-figure-pass             # offline smoke test, no model calls
 node src/cli.js fixtures/scanned.pdf                  # scanned pages route through the VLM path
 node src/cli.js fixtures/page-one.png                 # image inputs work too
+node src/cli.js fixtures/sample.pptx                  # PowerPoint (converted via LibreOffice, needs Docker)
 node src/cli.js test.pdf --subject "Quarterly report" # skips LLM subject detection
 node src/cli.js test.pdf --model modal                # use Modal-hosted Qwen3-VL instead of Groq
 node src/cli.js test.pdf --force-vlm                  # force every page through the VLM path
@@ -161,6 +167,41 @@ recorded as `source` / `demo` inside `ui-meta.json`.
 `run-report.json` also carries the same `run_id`. `--out <dir>` (or `options.out`)
 overrides the generated folder name entirely.
 
+## PowerPoint (.pptx) support
+
+`.pptx` decks are converted to PDF by **LibreOffice headless inside a locked-down Docker container**, then handed to the exact same pipeline as any PDF (built-in text-layer routing, VLM figure enrichment, table detection). The upload is never trusted: it is validated as untrusted input before the converter ever runs.
+
+### One-time setup
+
+```bash
+docker build -t pdf-parser-converter:latest docker/converter
+```
+
+That image is `debian:bookworm-slim` + `libreoffice-impress` + metric-compatible fonts (Liberation, Carlito≙Calibri, Caladea≙Cambria) — ~+450–600 MB, pinned via the distro release (bump the base image to upgrade LibreOffice deliberately). Host mode is an escape hatch for environments without Docker: install LibreOffice (`apt install libreoffice-impress`) and set `PPTX_CONVERTER=host` (`PPTX_SOFFICE_PATH=…` if not on PATH). Same flags, timeout and cleanup — no container isolation.
+
+### What happens on every upload
+
+1. **Validation** (`src/input/pptxValidate.js`, ~µs — never spawns LibreOffice):
+   - zip signature, EOCD, central directory vs local headers (zip-quilting defense), duplicate/encrypted/symlink/path-traversal/absolute/backslash entries rejected
+   - caps (all env-overridable): 25 MB file, 200 MB total / 50 MB per-entry / 25-slides / 1000 entries / 200 media files / 10000×10000 px images / 100:1 per-entry compression / 50:1 overall — actual bytes are counted while streaming inflate; declared sizes are never trusted
+   - required PPTX structure (`[Content_Types].xml`, `_rels/.rels`, `ppt/presentation.xml`) — rejects renamed DOCX/XLSX/ZIPs, encrypted decks, and nested archives
+   - slide count excludes hidden (`<p:sld show="0">`) and empty slides; over 25 **visible** slides → rejected before conversion
+2. **Empty slides are never rendered**: the job copy (never your original) gets `show="0"` injected on shape-less slides before conversion, so LibreOffice skips them entirely — zero VLM calls wasted.
+3. **Conversion** (`src/input/pptxToPdf.js`): `soffice --headless` in a per-job dir under `data/convert/<jobId>/` — no network, non-root user, read-only root fs, 1 GB memory with swap disabled, 100-PID cap, 1.5 CPUs, all capabilities dropped, `no-new-privileges`, isolated per-run profile. Default timeout **5 s** (`PPTX_CONVERT_TIMEOUT_MS`); maximum **2** simultaneous conversions (`PPTX_CONVERT_CONCURRENCY`), excess waits in queue. On timeout the whole process group is SIGKILLed (container is `docker kill`ed by cidfile). Everything is deleted in `finally`.
+4. **Pipeline**: the converted PDF is analyzed like any other. Pages == visible, non-empty slides. Born-digital deck pages route to the free text-layer path; figures/charts go through VLM enrichment if configured.
+
+The **original `.pptx` is never modified**. Converted PDFs, the input copy, and the soffice profile are deleted after the run (`out/` runs and `data/convert/` scratch are both gitignored).
+
+`run-report.json` carries extra fields: `pptx: { total, visible, hidden, empty }` (slide counts — `pages` is always visible slides only), `errors: { vlm_page, figure_pass, subject }` (non-fatal errors — shown in the UI as a `⚠ errors ×N` chip with a hover list), `deduped_blocks`, and `validation.figures: { chart_blocks, empty_content, needs_review, estimated }` (chart health at a glance). The summary band also shows `coverage <min>%` per-page (hover lists per page). Chart blocks emitted by the VLM page path with null/flagged content are re-analyzed by the figure pass automatically; heads and captions duplicated across the text-layer and VLM paths are merged automatically. Vector drawings from one chart (bars, axes, gridlines) are clustered into a single figure region before cropping — one crop per chart.
+
+**Graphical fidelity caveat:** chart values in the manifest are VLM estimates from rendered pixels (`estimates: true`). There is no exact-data path — LibreOffice discards native chart XML caches when rendering. Any chart whose numbers cannot be read from labeled axes is marked `content: null` + `needs_review: true` rather than invented; check `validation.figures.needs_review` and the UI's `needs_review` chips before trusting chart data.
+
+Upload fails with a specific reason (too big, too many slides, zip bomb, encrypted, missing parts…) — shown verbatim in the UI, exit code message in the CLI. The slide cap of 25 also applies here: it counts **visible** slides only.
+
+`GET /api/jobs` and `GET /api/jobs/:id` expose a coarse job status (`queued → converting → analyzing → done | failed`) for a future async UI. `POST /api/analyze` remains synchronous today.
+
+**Cost note:** a born-digital deck costs zero model calls for text (figure enrichment and subject detection aside). A conversion of a typical 10-slide deck takes ~1–4 s, dominated by LibreOffice startup.
+
 ## Run the UI
 
 ```bash
@@ -169,8 +210,8 @@ npm run ui     # → http://127.0.0.1:3040
 ```
 
 The single-page browser UI (`UI/`) exposes the whole pipeline: pick a demo
-(`test.pdf` — born-digital, free; `fixtures/scanned.pdf` — scanned, calls the VLM)
-or drag-and-drop your own `.pdf/.png/.jpg/.jpeg/.tif/.tiff/.webp/.bmp`, choose the
+(`test.pdf` — born-digital, free; `fixtures/scanned.pdf` — scanned, calls the VLM; `fixtures/sample.pptx` — PowerPoint, converted via Docker)
+or drag-and-drop your own `.pdf/.pptx/.png/.jpg/.jpeg/.tif/.tiff/.webp/.bmp`, choose the
 backend (Groq vs Modal vLLM), optionally set a subject, toggle figure analysis,
 figure VLM forcing, and auto-subject. Results render the full tree: headings as
 nested sections, lists as real lists, tables as real `<table>`s, bar/line/pie
@@ -178,7 +219,7 @@ charts as inline SVG. `manifest.json` / `run-report.json` download from the
 toolbar; runs persist in `out/ui/` under self-describing folder names (see
 [Output](#output)) and show up in the run history sidebar.
 
-Deep links: `http://127.0.0.1:3040/?run=test.pdf` auto-runs a demo on page load.
+Deep links: `http://127.0.0.1:3040/?run=test.pdf` pre-selects the demo (no auto-run — it spends tokens); `?run=fixtures/sample.pptx` pre-selects the PowerPoint demo (runs the Docker LibreOffice conversion).
 
 > **Cost note:** the born-digital text path makes **zero** model calls for
 > pages; figure analysis, scanned pages, and auto-subject each do. Token usage

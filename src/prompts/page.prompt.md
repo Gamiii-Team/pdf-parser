@@ -22,10 +22,10 @@ Hard rules:
 3. Captions live ON the table/chart block. If a table has no caption text above/below it, set "caption": null.
 4. For tables: preserve cell text exactly as visible, including commas in numbers like "1,200". Do NOT strip units or currency signs. Do NOT add/remove columns/rows. If a cell is unreadable, write "" and set needs_review:true for that block.
 5. For tables rendered inside a larger figure pasted mid-paragraph: type it as "table-image" chart rather than a table — only tables with regular grid structure should end up as "table".
-6. For charts involving numerical data, include the data if you can read it confidently:
+6. For charts involving numerical data, include the data if you can read it or estimate it:
      - bar/line:  "content": { "x": [...], "series": [{ "name": "...", "values": [...] }] }
      - pie:       "content": { "slices": [{ "label": "...", "percent": <number> }] }
-   If the numbers are estimates read from axes, set "estimates": true. If you cannot read them reliably, set "content": null and "needs_review": true. Never invent numbers.
+   If the axis is labeled/gridlined enough to estimate values from pixels (bar height vs labeled ticks), DO output content with "estimates": true rather than null. Only set "content": null + "needs_review": true when the numbers genuinely cannot be read or estimated. Never invent numbers.
 7. Lists: keep the bullet/number text out of "items" — write only the item text without the marker.
 8. A page may be almost entirely blank or contain only an image; return what you can see, even if it's 0 blocks. If the page is entirely unreadable, return { "blocks": [], "needs_review": true }.
 9. Reading order is top-to-bottom, then left-to-right (column order for multi-column layouts).

@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<title>Slide review · PDF → Structured JSON</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="%23f5a623"/><text x="16" y="22" font-size="17" text-anchor="middle" font-family="monospace" fill="%231c1917">{}</text></svg>' />
+<style>
+:root {
+  --bg: #141414; --panel: rgba(26, 26, 26, 0.78); --panel-solid: #1c1c1c;
+  --border: rgba(255, 255, 255, 0.09); --border-strong: rgba(255, 255, 255, 0.16);
+  --text: #e8e6e3; --muted: #8d8b88; --faint: #5c5a57;
+  --amber: #f5a623; --amber-soft: rgba(245, 166, 35, 0.14);
+  --green: #34d399; --red: #f87171; --mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+.skipped-toggle { background: transparent; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--muted); font-size: 0.75rem; padding: 8px 10px; text-align: left; width: 100%; }
+.skipped-toggle:hover { color: var(--amber); border-color: var(--amber); }
+.read-only-slide { opacity: 0.55; }
+.read-only-slide:hover { opacity: 0.85; }
+.queue-badge { font-family: var(--mono); font-size: 0.6rem; padding: 1px 5px; border-radius: 4px; background: var(--amber-soft); color: var(--amber); text-transform: uppercase; }
+.approved-badge { font-family: var(--mono); font-size: 0.6rem; padding: 1px 5px; border-radius: 4px; border: 1px solid rgba(52, 211, 153, 0.4); color: var(--green); text-transform: uppercase; }
+.lock-note { font-size: 0.7rem; color: var(--muted); font-family: var(--mono); margin-left: 8px; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; min-height: 100vh; }
+button { font: inherit; cursor: pointer; }
+header.topbar { display: flex; align-items: center; gap: 14px; padding: 10px 18px; border-bottom: 1px solid var(--border); background: var(--panel); backdrop-filter: blur(10px); position: sticky; top: 0; z-index: 5; }
+.back { color: var(--muted); text-decoration: none; font-size: 0.9rem; }
+.back:hover { color: var(--text); }
+.file-name { font-weight: 650; }
+.chip { font-family: var(--mono); font-size: 0.72rem; padding: 3px 8px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--muted); }
+.chip b { color: var(--text); }
+.pill { font-family: var(--mono); font-size: 0.72rem; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border-strong); }
+.pill.review { color: var(--amber); border-color: rgba(245,166,35,.4); background: var(--amber-soft); }
+.pill.failed { color: var(--red); border-color: rgba(248,113,113,.4); }
+.pill.done { color: var(--green); border-color: rgba(52,211,153,.4); }
+.spacer { flex: 1; }
+.nav-btn { width: 30px; height: 30px; border-radius: 6px; border: 1px solid var(--border-strong); background: transparent; color: var(--text); }
+.nav-btn:hover { border-color: var(--amber); color: var(--amber); }
+.nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+main.layout { display: grid; grid-template-columns: 220px 1fr 430px; height: calc(100vh - 54px); }
+@media (max-width: 1150px) { main.layout { grid-template-columns: 1fr; height: auto; } }
+.rail { border-right: 1px solid var(--border); overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.slide-item { display: flex; gap: 10px; align-items: center; padding: 7px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--text); text-align: left; }
+.slide-item:hover { background: rgba(255,255,255,.04); }
+.slide-item.active { border-color: var(--amber); background: var(--amber-soft); }
+.slide-item img { width: 72px; height: 44px; object-fit: cover; object-position: top center; border-radius: 4px; border: 1px solid var(--border); background: #222; }
+.si-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.si-num { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+.badges { display: flex; gap: 4px; flex-wrap: wrap; }
+.badge { font-family: var(--mono); font-size: 0.6rem; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border-strong); color: var(--muted); text-transform: uppercase; }
+.badge.failed { color: var(--red); border-color: rgba(248,113,113,.5); }
+.badge.low { color: var(--amber); border-color: rgba(245,166,35,.5); }
+.badge.issues { color: #fca5a5; border-color: rgba(248,113,113,.35); }
+.badge.reviewed { color: var(--green); border-color: rgba(52,211,153,.4); }
+section.viewer { overflow: auto; display: flex; flex-direction: column; align-items: center; padding: 14px; gap: 10px; background: #101010; }
+.img-wrap { position: relative; border: 1px solid var(--border-strong); border-radius: 8px; overflow: hidden; background: #000; max-width: 100%; line-height: 0; }
+#slideImage { display: block; max-width: 100%; height: auto; }
+#bboxOverlay { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; user-select: none; }
+#bboxOverlay .fig { cursor: pointer; fill: rgba(245, 166, 35, 0.08); stroke: var(--amber); stroke-width: 1.5; stroke-dasharray: 4 3; }
+#bboxOverlay .fig.c0 { stroke: var(--amber); fill: rgba(245, 166, 35, 0.10); }
+#bboxOverlay .fig.c1 { stroke: #34d399; fill: rgba(52, 211, 153, 0.10); }
+#bboxOverlay .fig.c2 { stroke: #818cf8; fill: rgba(129, 140, 248, 0.10); }
+#bboxOverlay .fig.c3 { stroke: #f472b6; fill: rgba(244, 114, 182, 0.10); }
+#bboxOverlay .fig.c4 { stroke: #a3e635; fill: rgba(163, 230, 53, 0.10); }
+#bboxOverlay .fig.c5 { stroke: #38bdf8; fill: rgba(56, 189, 248, 0.10); }
+#bboxOverlay .fig.sel { fill: rgba(245, 166, 35, 0.18); stroke-width: 2.2; }
+#bboxOverlay text.figtag { fill: var(--amber); font-family: var(--mono); font-size: 11px; paint-order: stroke; stroke: #141414; stroke-width: 3px; pointer-events: none; }
+#bboxOverlay .handle { fill: var(--amber); stroke: #141414; stroke-width: 1.4; cursor: crosshair; }
+#bboxOverlay.drawing { cursor: crosshair; }
+#bboxOverlay .draft { stroke: var(--green); fill: rgba(52, 211, 153, 0.15); stroke-width: 1.5; }
+.tool-row { display: flex; gap: 8px; align-items: center; color: var(--muted); font-family: var(--mono); font-size: 0.72rem; flex-wrap: wrap; }
+.tool-row button { min-width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border-strong); background: transparent; color: var(--text); padding: 0 6px; }
+.tool-row button:hover { border-color: var(--amber); color: var(--amber); }
+.tool-row button.active { border-color: var(--green); color: var(--green); }
+.editor { border-left: 1px solid var(--border); display: grid; grid-template-rows: auto 1fr auto auto; background: var(--panel-solid); min-height: 0; }
+.editor-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px 6px; border-bottom: 1px solid var(--border); }
+.editor-head h2 { margin: 0; font-size: 0.85rem; font-weight: 650; font-family: var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+#jsonValid { font-family: var(--mono); font-size: 0.68rem; color: var(--green); }
+#jsonValid.bad { color: var(--red); }
+#jsonEditor { width: 100%; height: 100%; min-height: 200px; resize: none; border: 0; outline: none; background: #101010; color: var(--text); font-family: var(--mono); font-size: 12.5px; line-height: 1.55; padding: 12px 14px; white-space: pre; overflow: auto; }
+.figure-bar { max-height: 190px; overflow-y: auto; border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; }
+.figure-bar:empty { display: none; }
+.fig-row { display: grid; grid-template-columns: 108px 44px 1fr auto; gap: 6px; align-items: center; font-size: 0.78rem; border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
+.fig-row.excluded { opacity: 0.45; }
+.fig-row.active { border-color: var(--amber); }
+.fig-row .ft { font-family: var(--mono); font-size: 0.62rem; color: var(--amber); text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fig-row .ft b { color: var(--text); text-transform: none; display: block; }
+.fig-row input[type="text"] { background: #101010; border: 1px solid var(--border-strong); color: var(--text); border-radius: 4px; padding: 3px 6px; font-size: 0.72rem; width: 100%; }
+.crop { width: 44px; height: 54px; object-fit: cover; object-position: top center; border-radius: 3px; border: 1px solid var(--border-strong); background: #111; }
+.fig-actions { display: flex; flex-direction: column; gap: 3px; align-items: end; }
+.chk { display: flex; align-items: center; gap: 3px; font-size: 0.62rem; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.chk input { accent-color: var(--amber); }
+.mini { font-size: 0.62rem; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border-strong); background: transparent; color: var(--muted); }
+.mini:hover { color: var(--amber); border-color: var(--amber); }
+.missing-row { display: flex; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--border); align-items: center; }
+.missing-row input { flex: 1; background: #101010; color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 10px; font: inherit; }
+.missing-row input::placeholder { color: var(--faint); }
+.btn-row { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
+.btn { padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border-strong); background: rgba(255,255,255,.04); color: var(--text); font-weight: 600; font-size: 0.83rem; }
+.btn.primary { background: var(--amber); border-color: var(--amber); color: #1c1917; }
+.btn.ok { background: var(--green); border-color: var(--green); color: #0d2018; }
+.btn.ghost:hover { border-color: var(--amber); color: var(--amber); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.danger:hover { border-color: var(--red); color: var(--red); }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #262626; border: 1px solid var(--border-strong); color: var(--text); padding: 8px 14px; border-radius: 8px; font-size: 0.85rem; z-index: 50; opacity: 0; transition: opacity 200ms; pointer-events: none; max-width: 60vw; }
+.toast.show { opacity: 1; }
+.loading { display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--muted); font-family: var(--mono); }
+.hidden { display: none !important; }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.25); border-top-color: var(--amber); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head><body>
+<header class="topbar">
+  <a class="back" href="/">← back</a>
+  <span class="file-name" id="fileName">loading…</span>
+  <button class="nav-btn" id="prevBtn" aria-label="previous slide">‹</button>
+  <span class="chip" id="slideCounter">–/–</span>
+  <button class="nav-btn" id="nextBtn" aria-label="next slide">›</button>
+  <span class="pill review" id="statusPill">review</span>
+  <span class="spacer"></span>
+  <span class="chip" id="progressChip"></span>
+  <button class="btn ok" id="exportBtn" disabled>Export JSON</button>
+</header>
+
+<main class="layout">
+  <nav class="rail" id="slideList" aria-label="Slides in review queue"></nav>
+  <section class="viewer">
+    <div class="img-wrap" id="imgWrap">
+      <img id="slideImage" alt="Current slide" />
+      <svg id="bboxOverlay" role="application" aria-label="Figure bounding boxes — drag to move, arrow keys to nudge, Delete to clear"></svg>
+    </div>
+    <div class="tool-row">
+      <button id="zoomOut" aria-label="zoom out">−</button>
+      <span id="zoomLabel">100%</span>
+      <button id="zoomIn" aria-label="zoom in">+</button>
+      <span style="width:8px"></span>
+      <button id="overlayToggle" aria-label="toggle figure boxes">◱ boxes</button>
+      <button id="drawToggle" aria-label="draw a new figure box">+ box</button>
+      <button id="resetBox" aria-label="reset selected figure box">↺ reset</button>
+      <button id="clearBox" aria-label="clear selected figure box">✕ box</button>
+      <button id="zoomPassBtn" aria-label="zoom pass on selected figure">🔍 zoom text</button>
+      <span id="slideIdLine" class="status-line"></span>
+    </div>
+  </section>
+  <aside class="editor" id="editor">
+    <div class="editor-head"><h2>Slide <span id="slideNum">–</span> · <span id="slideTitle">(loading)</span><span class="lock-note" id="approvedNote"></span></h2></div>
+    <div class="editor-head" style="border-top:0; border-bottom:1px solid var(--border); padding-top:0; justify-content:flex-start; gap:8px">
+      <h2 style="font-size:0.7rem">JSON — figures &amp; tables only</h2>
+      <span id="jsonValid" style="margin-left:auto; font-family:var(--mono); font-size:0.68rem; color:var(--green)">valid</span>
+    </div>
+    <textarea id="jsonEditor" spellcheck="false" aria-label="Slide figures and tables JSON"></textarea>
+    <div class="figure-bar" id="figureBar"></div>
+    <div class="missing-row">
+      <input type="text" id="missingInput" placeholder="What's missing on this slide? (e.g. there is a pie chart bottom-right)" aria-label="What is missing on this slide" />
+    </div>
+    <div class="btn-row">
+      <button class="btn ghost" id="rerunBtn" type="button">↻ Re-run figures &amp; tables</button>
+      <button class="btn ghost" id="undoBtn" type="button">↶ Undo re-run</button>
+      <button class="btn primary" id="approveBtn" type="button" style="margin-left:auto">Approve ✓</button>
+    </div>
+    <div class="btn-row" style="border-top:0; padding-top:0; justify-content:center; margin-top:-4px">
+      <button class="btn ghost" id="reopenBtn" type="button" style="display:none; font-size:0.75rem">Reopen for editing</button>
+    </div>
+  </aside>
+</main>
+
+<div class="loading" id="boot">loading job…</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (s) => document.querySelector(s);
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+  const toast = (msg) => { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 2600); };
+  const params = new URLSearchParams(location.search);
+  const jobId = params.get("id") ?? "";
+  const API = (p, opts = {}) => fetch("/api/jobs/" + encodeURIComponent(jobId) + p, {
+    headers: { "Content-Type": "application/json" }, ...opts,
+  }).then(async (r) => {
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body?.error ?? (r.status + " " + r.statusText));
+    return body;
+  });
+
+  const state = {
+    result: null, report: null,
+    // per-slide state from the server job response
+    statuses: {},     // n -> "auto" | "queued" | "approved" | "failed"
+    queue: [],        // queued slide numbers in order
+    skipped: [],      // auto slide numbers
+    view: "queue",    // "queue" | "skipped"
+    current: 0,       // index into queue array
+    skippedIndex: null,
+    zoom: 1, overlay: true, dirty: false,
+    selected: null, drawMode: false, drag: null,
+    bboxSnap: null, cropStamp: 0,
+  };
+  const show = (sel, on) => $(sel).classList.toggle("hidden", !on);
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const round3 = (v) => Math.round(v * 1000) / 1000;
+  const MIN_BOX = 0.02;
+  const COLORS = ["c0", "c1", "c2", "c3", "c4", "c5"];
+  const slideInQueue = () => state.queue[state.current];
+  const slideInSkipped = () => state.skippedIndex != null ? state.skipped[state.skippedIndex] : null;
+
+  // ═════════ helpers ═════════
+  function figureCounts(slide) {
+    return {
+      figures: slide?.figures?.length ?? 0,
+      tables: slide?.tables?.length ?? 0,
+    };
+  }
+  function queuedSlides() { return state.queue.map((n) => state.result?.slides?.find((s) => s.slide === n)).filter(Boolean); }
+  function skippedSlides() { return state.skipped.map((n) => state.result?.slides?.find((s) => s.slide === n)).filter(Boolean); }
+  function selectedSlide() {
+    if (state.view === "skipped") {
+      const n = state.skippedIndex != null ? state.skipped[state.skippedIndex] : null;
+      return state.result?.slides?.find((s) => s.slide === n) ?? null;
+    }
+    const n = state.queue[state.current];
+    return state.result?.slides?.find((s) => s.slide === n) ?? null;
+  }
+  function currentSlideNumber() { const s = selectedSlide(); return s?.slide ?? 1; }
+  function isApproved(slide) { return state.statuses[slide?.slide] === "approved"; }
+
+  // ═════════ rail rendering ═════════
+  function badgesFor(slide) {
+    const b = [];
+    if (slide?.failed) b.push(el("span", "badge failed", "failed"));
+    if ((slide?.confidence ?? "medium") === "low") b.push(el("span", "badge low", "low"));
+    if (slide?.issues?.length) b.push(el("span", "badge issues", `issues ×${slide.issues.length}`));
+    const status = state.statuses[slide?.slide];
+    if (status === "approved") b.push(el("span", "badge reviewed", "✓ approved"));
+    else if (status === "queued") b.push(el("span", "queue-badge", "queued"));
+    else if (status === "failed") b.push(el("span", "badge failed", "failed"));
+    return b;
+  }
+  function renderRail() {
+    const rail = $("#slideList");
+    rail.innerHTML = "";
+    const q = queuedSlides();
+    const order = q.map((s, i) => [s, i]).sort((a, b) => {
+      const sa = badgeScore(a[0]), sb = badgeScore(b[0]);
+      return sb - sa || a[0].slide - b[0].slide;
+    });
+    for (const [slide, i] of order) {
+      const approved = state.statuses[slide.slide] === "approved";
+      const counts = figureCounts(slide);
+      const btn = el("button", "slide-item" + (i === state.current && state.view === "queue" ? " active" : ""));
+      btn.type = "button";
+      btn.setAttribute("aria-label", `Slide ${slide.slide}`);
+      const img = el("img");
+      img.src = `/api/jobs/${encodeURIComponent(jobId)}/slides/${slide.slide}`;
+      img.alt = `Slide ${slide.slide}`;
+      const meta = el("span", "si-meta");
+      meta.appendChild(el("span", "si-num", `#${String(slide.slide).padStart(2, "0")} · ${counts.figures} fig${counts.tables ? ` · ${counts.tables} tbl` : ""}`));
+      const badges = el("span", "badges");
+      for (const b of badgesFor(slide)) badges.appendChild(b);
+      meta.appendChild(badges);
+      btn.append(img, meta);
+      btn.addEventListener("click", () => { state.view = "queue"; state.current = i; state.skippedIndex = null; state.selected = null; renderAll(); });
+      rail.appendChild(btn);
+    }
+    // skipped — text-only slides (toggled by the "text-only slides skipped" button)
+    if (state.skipped.length > 0) {
+      const toggle = el("button", "skipped-toggle", `${state.skipped.length} text-only slide${state.skipped.length === 1 ? "" : "s"} skipped${state.view === "skipped" ? " (open)" : ""}`);
+      toggle.type = "button";
+      toggle.addEventListener("click", () => {
+        if (state.view === "skipped") { state.view = "queue"; state.skippedIndex = null; }
+        else { state.view = "skipped"; state.skippedIndex = 0; state.selected = null; }
+        renderAll();
+      });
+      rail.appendChild(toggle);
+      if (state.view === "skipped") {
+        for (const [idx, n] of state.skipped.entries()) {
+          const skippedSlide = state.result.slides.find((s) => s.slide === n);
+          if (!skippedSlide) continue;
+          const btn = el("button", "slide-item read-only-slide" + (idx === state.skippedIndex ? " active" : ""));
+          btn.type = "button";
+          btn.setAttribute("aria-label", `Skipped slide ${skippedSlide.slide} (read-only)`);
+          const img = el("img");
+          img.src = `/api/jobs/${encodeURIComponent(jobId)}/slides/${skippedSlide.slide}`;
+          img.alt = `Slide ${skippedSlide.slide}`;
+          const meta = el("span", "si-meta");
+          meta.appendChild(el("span", "si-num", `#${String(skippedSlide.slide).padStart(2, "0")} · text-only`));
+          const badges = el("span", "badges");
+          badges.appendChild(el("span", "queue-badge", "skipped"));
+          meta.appendChild(badges);
+          btn.append(img, meta);
+          btn.addEventListener("click", () => { state.skippedIndex = idx; state.selected = null; renderAll(); });
+          rail.appendChild(btn);
+        }
+      }
+    }
+  }
+  const badgeScore = (s) => ((s?.failed ? 100 : 0) + ((s?.confidence ?? "medium") === "low" ? 10 : 0) + (s?.issues?.length ? 1 : 0) + (state.statuses[s?.slide] === "approved" ? -100 : 0));
+
+  // ═════════ header / progress ═════════
+  function renderProgress() {
+    const approvedCount = state.result.slides.filter((s) => state.statuses[s.slide] === "approved").length;
+    const inSkipped = state.view === "skipped";
+    const s = selectedSlide();
+    const slideNum = state.view === "skipped" ? state.skipped[state.skippedIndex] : state.queue[state.current];
+    $("#progressChip").textContent = `${approvedCount}/${state.result.slides.length} approved · ${state.queue.length} in queue`;
+    $("#slideCounter").textContent = inSkipped ? `skipped ${state.skippedIndex + 1}/${state.skipped.length}` : `${slideNum ?? "–"}/${state.result.slides.length}`;
+    $("#statusPill").textContent = inSkipped ? "skipped" : "review";
+    $("#statusPill").className = "pill " + (inSkipped ? "done" : "review");
+    const exportable = state.result.slides.length > 0;
+    $("#exportBtn").disabled = !exportable;
+    $("#prevBtn").disabled = inSkipped ? false : state.current === 0;
+    $("#nextBtn").disabled = inSkipped ? false : state.current >= state.queue.length - 1;
+    $("#undoBtn").disabled = !(s?.previous?.figures);
+    $("#zoomPassBtn").disabled = state.selected == null || !Array.isArray(s?.figures?.[state.selected]?.bbox);
+    $("#resetBox").disabled = state.selected == null;
+    $("#clearBox").disabled = state.selected == null;
+    $("#slideNum").textContent = s ? s.slide : "–";
+    $("#slideTitle").textContent = s ? (s.title ?? "(unnamed)") : "";
+    const approved = s && state.statuses[s.slide] === "approved";
+    const isSkipped = state.view === "skipped" && s && (state.statuses[s.slide] === "auto" || !state.statuses[s.slide]);
+    $("#approvedNote").textContent = approved ? "APPROVED — locked" : (isSkipped ? "text-only — read-only until a figure is added" : "");
+    // Skipped text-only slides don't get an Approve button (nothing to approve)
+    $("#approveBtn").disabled = Boolean(approved) || Boolean(isSkipped);
+    $("#approveBtn").textContent = approved ? "Approved ✓" : (isSkipped ? "Add a figure to review" : "Approve ✓");
+    $("#reopenBtn").style.display = approved ? "" : "none";
+    $("#rerunBtn").disabled = Boolean(approved) || Boolean(isSkipped);
+    $("#jsonEditor").disabled = Boolean(approved) || Boolean(isSkipped);
+    $("#missingInput").disabled = Boolean(approved) || Boolean(isSkipped);
+  }
+
+  // ═════════ image + bbox overlay ═════════
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = $("#bboxOverlay");
+  function relBoxFromEvent(e) {
+    const r = $("#slideImage").getBoundingClientRect();
+    return { x: clamp01((e.clientX - r.left) / r.width), y: clamp01((e.clientY - r.top) / r.height) };
+  }
+  function boxOf(figs, i) { const b = figs[i]?.bbox; return Array.isArray(b) ? [b[0], b[1], b[2], b[3]] : null; }
+  function drawOverlay(s) {
+    const img = $("#slideImage");
+    svg.innerHTML = "";
+    if (!state.overlay) return;
+    const w = img.clientWidth, h = img.clientHeight;
+    if (!w || !h) return;
+    svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    const figs = s?.figures ?? [];
+    figs.forEach((f, i) => {
+      if (f.excluded) return;
+      const b = boxOf(figs, i);
+      if (!b) return;
+      const [x0, y0, x1, y1] = b;
+      const color = COLORS[i % COLORS.length];
+      const rect = document.createElementNS(NS, "rect");
+      rect.setAttribute("x", x0 * w); rect.setAttribute("y", y0 * h);
+      rect.setAttribute("width", Math.max(1, (x1 - x0) * w)); rect.setAttribute("height", Math.max(1, (y1 - y0) * h));
+      rect.setAttribute("class", "fig " + color + (state.selected === i ? " sel" : ""));
+      rect.dataset.index = String(i);
+      svg.appendChild(rect);
+      const label = document.createElementNS(NS, "text");
+      label.setAttribute("x", x0 * w + 4); label.setAttribute("y", y0 * h + 14);
+      label.setAttribute("class", "figtag");
+      label.textContent = `Figure ${i + 1}${f.bbox_locked ? " 🔒" : ""}${f.bbox_source === "reviewer" ? " R" : ""}`;
+      svg.appendChild(label);
+      if (state.selected === i) drawHandles(svg, w, h, b);
+    });
+  }
+  function drawHandles(svg, w, h, b) {
+    const [x0, y0, x1, y1] = b;
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    const handles = { nw: [x0, y0], n: [cx, y0], ne: [x1, y0], e: [x1, cy], se: [x1, y1], s: [cx, y1], sw: [x0, y1], w: [x0, cy] };
+    for (const [id, [hx, hy]] of Object.entries(handles)) {
+      const r = document.createElementNS(NS, "rect");
+      const sz = 9;
+      r.setAttribute("x", hx * w - sz / 2); r.setAttribute("y", hy * h - sz / 2);
+      r.setAttribute("width", sz); r.setAttribute("height", sz);
+      r.setAttribute("class", "handle");
+      r.dataset.handle = id;
+      svg.appendChild(r);
+    }
+  }
+  function hitHandle(e) { return e.target?.dataset?.handle ?? null; }
+  function hitFigure(e, figs) {
+    const p = relBoxFromEvent(e);
+    for (let i = figs.length - 1; i >= 0; i--) {
+      const b = boxOf(figs, i);
+      if (b && !figs[i].excluded && p.x >= b[0] && p.x <= b[2] && p.y >= b[1] && p.y <= b[3]) return i;
+    }
+    return null;
+  }
+  function hitInsideFigureById(e, id) {
+    const t = e.target;
+    return t?.dataset?.index === String(id) ? id : null;
+  }
+  svg.addEventListener("pointerdown", (e) => {
+    if ($("#jsonEditor").disabled) return; // locked — no editing
+    const s = selectedSlide();
+    if (!s || state.view === "skipped") return;
+    const figs = s?.figures ?? [];
+    svg.setPointerCapture?.(e.pointerId);
+    const p = relBoxFromEvent(e);
+    if (state.drawMode) {
+      state.drag = { kind: "new", start: p, box: [p.x, p.y, p.x, p.y] };
+      svg.classList.add("drawing");
+      e.preventDefault();
+      return;
+    }
+    const handle = hitHandle(e);
+    if (handle && state.selected != null) {
+      state.drag = { kind: "resize", index: state.selected, handle, box: boxOf(figs, state.selected).slice(), start: p };
+      e.preventDefault();
+      return;
+    }
+    const hit = hitFigure(e, figs);
+    if (hit != null) {
+      state.selected = hit;
+      state.drag = { kind: "move", index: hit, box: boxOf(figs, hit).slice(), start: p };
+      renderFigureBar(s);
+      drawOverlay(s);
+      e.preventDefault();
+      return;
+    }
+    state.selected = null;
+    renderFigureBar(s);
+    drawOverlay(s);
+  });
+  svg.addEventListener("pointermove", (e) => {
+    const s = selectedSlide();
+    if (!s) return;
+    const figs = s.figures ?? [];
+    const p = relBoxFromEvent(e);
+    const d = state.drag;
+    if (d?.kind === "new") {
+      d.box = [Math.min(d.start.x, p.x), Math.min(d.start.y, p.y), Math.max(d.start.x, p.x), Math.max(d.start.y, p.y)];
+      const draft = svg.querySelector(".draft");
+      if (draft) draft.remove();
+      const w = $("#slideImage").clientWidth, h = $("#slideImage").clientHeight;
+      const r = document.createElementNS(NS, "rect");
+      r.setAttribute("x", d.box[0] * w); r.setAttribute("y", d.box[1] * h);
+      r.setAttribute("width", (d.box[2] - d.box[0]) * w); r.setAttribute("height", (d.box[3] - d.box[1]) * h);
+      r.setAttribute("class", "draft");
+      svg.appendChild(r);
+      return;
+    }
+    if (!state.drag) return;
+    if (d.kind === "move") {
+      const dx = p.x - d.start.x, dy = p.y - d.start.y;
+      let [x0, y0, x1, y1] = d.box;
+      const w = x1 - x0, h = y1 - y0;
+      x0 = clamp01(x0 + dx); const x1n = x0 + w; if (x1n > 1) { x0 = 1 - w; } x1 = x0 + w;
+      y0 = clamp01(y0 + dy); const y1n = y0 + h; if (y1n > 1) { y0 = 1 - h; } y1 = y0 + h;
+      figs[d.index].bbox = [round3(x0), round3(y0), round3(x1), round3(y1)];
+    } else if (d.kind === "resize") {
+      const dx = p.x - d.start.x, dy = p.y - d.start.y;
+      let [x0, y0, x1, y1] = d.box;
+      const h_ = d.handle;
+      if (h_.includes("w")) x0 = clamp01(d.box[0] + dx);
+      if (h_.includes("e")) x1 = clamp01(d.box[2] + dx);
+      if (h_.includes("n")) y0 = clamp01(d.box[1] + dy);
+      if (h_.includes("s")) y1 = clamp01(d.box[3] + dy);
+      if (x1 - x0 < MIN_BOX) { if (h_.includes("w")) x0 = x1 - MIN_BOX; else x1 = x0 + MIN_BOX; }
+      if (y1 - y0 < MIN_BOX) { if (h_.includes("n")) y0 = y1 - MIN_BOX; else y1 = y0 + MIN_BOX; }
+      figs[d.index].bbox = [round3(x0), round3(y0), round3(x1), round3(y1)];
+    }
+    figs[d.index].bbox_source = "reviewer";
+    figs[d.index].bbox_locked = true;
+    editor.value = editorTextFor(s);
+    state.dirty = true;
+    drawOverlay(s);
+    markRowActive();
+  });
+  svg.addEventListener("pointerup", () => {
+    const d = state.drag;
+    state.drag = null;
+    svg.classList.remove("drawing");
+    if (!d) return;
+    if (d.kind === "new") {
+      const [x0, y0, x1, y1] = d.box;
+      const s = selectedSlide();
+      if (x1 - x0 < MIN_BOX || y1 - y0 < MIN_BOX) { toast("box too small — draw bigger"); drawOverlay(s); return; }
+      s.figures = s.figures ?? [];
+      s.figures.push({ type: "diagram", title: `New figure ${s.figures.length + 1}`, description: "(reviewer-added) describe the figure here", data: { labels: [], series: [] }, visible_text: [], bbox: [round3(x0), round3(y0), round3(x1), round3(y1)], bbox_source: "reviewer", bbox_locked: true });
+      state.selected = s.figures.length - 1;
+      state.drawMode = false;
+      $("#drawToggle").classList.remove("active");
+      editor.value = editorTextFor(s);
+      state.dirty = true;
+      renderFigureBar(s);
+      drawOverlay(s);
+      markRowActive();
+      toast("figure box added");
+      saveCurrent().catch(() => {});
+      return;
+    }
+    const s = selectedSlide();
+    drawOverlay(s);
+    state.dirty = true;
+  });
+
+  // ═════════ editor ═════════
+  const editor = $("#jsonEditor");
+  const validEl = $("#jsonValid");
+  const editorTextFor = (s) => JSON.stringify({ figures: s.figures ?? [], tables: s.tables ?? [] }, null, 2);
+  function setEditorFromSlide(s) {
+    editor.value = editorTextFor(s);
+    state.dirty = false;
+    markValid(true, "valid");
+  }
+  function markValid(ok, msg) { validEl.textContent = msg; validEl.classList.toggle("bad", !ok); }
+  function tryParseEditor() {
+    try {
+      const parsed = JSON.parse(editor.value || "{}");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("top level must be an object");
+      return { parsed, ok: true };
+    } catch (err) { return { ok: false, error: String(err?.message ?? err) }; }
+  }
+  editor.addEventListener("input", () => {
+    state.dirty = true;
+    if ($("#jsonEditor").disabled) return;
+    const { parsed, ok, error } = tryParseEditor();
+    if (!ok) { markValid(false, "invalid JSON — " + error); return; }
+    markValid(true, "valid");
+    const s = selectedSlide();
+    if (!s) return;
+    // Editor may only carry figures + tables; keep the rest of the slide verbatim.
+    const next = { ...s, figures: Array.isArray(parsed.figures) ? parsed.figures : [], tables: Array.isArray(parsed.tables) ? parsed.tables : [] };
+    state.result.slides[state.result.slides.findIndex((x) => x.slide === s.slide)] = next;
+    renderFigureBar(next);
+    renderProgress();
+    markRowActive();
+  });
+
+  // ═════════ figure bar ═════════
+  function renderFigureBar(s) {
+    const bar = $("#figureBar");
+    bar.innerHTML = "";
+    if (!s) return;
+    (s.figures ?? []).forEach((f, i) => {
+      const row = el("div", "fig-row" + (f.excluded ? " excluded" : "") + (state.selected === i ? " active" : ""));
+      const meta = el("div", null);
+      const titleEl = el("div", "ft", null);
+      const t2 = el("b", null, String(f.title ?? f.description ?? "unnamed").slice(0, 48));
+      titleEl.append(`${i + 1} · ${f.type ?? "?"}`, t2);
+      meta.appendChild(titleEl);
+      const note = el("input");
+      note.type = "text";
+      note.placeholder = "note (e.g. chart has 5 bars)";
+      note.value = f.reviewer_note ?? "";
+      note.addEventListener("focus", () => { state.selected = i; const s0 = selectedSlide(); drawOverlay(s0); markRowActive(); });
+      note.addEventListener("input", () => { f.reviewer_note = note.value; state.dirty = true; editor.value = editorTextFor(s); });
+      let crop = null;
+      if (Array.isArray(f.bbox)) {
+        crop = el("img", "crop");
+        crop.src = `/api/jobs/${encodeURIComponent(jobId)}/slides/${s.slide}/crop/${i}?sheet=${Date.now()}`;
+        crop.alt = "crop preview";
+        crop.addEventListener("click", () => { state.selected = i; renderAll(); });
+      }
+      const chkLabel = el("label", "chk");
+      const chk = el("input");
+      chk.type = "checkbox";
+      chk.checked = Boolean(f.excluded);
+      chk.addEventListener("change", () => { f.excluded = chk.checked; state.dirty = true; saveCurrent().catch(() => {}); });
+      chkLabel.append(chk, el("span", null, "not a figure"));
+      const actions = el("div", "fig-actions");
+      actions.appendChild(chkLabel);
+      row.append(meta, crop, note, actions);
+      bar.appendChild(row);
+    });
+    // $add figure — for skipped slides (and as an "Add figure" affordance on queued slides that want one)
+    const addBtn = el("button", "mini", "+ Add figure");
+    addBtn.type = "button";
+    addBtn.addEventListener("click", async () => {
+      const slideNum = s?.slide;
+      if (slideNum == null) return;
+      try {
+        const nextFigure = { type: "diagram", title: "New figure", description: "describe this figure", data: { labels: [], series: [] }, visible_text: [] };
+        const figures = [...(s.figures ?? []), nextFigure];
+        const { slide: saved } = await API(`/slides/${slideNum}`, { method: "PUT", body: JSON.stringify({ figures, tables: s.tables ?? [] }) });
+        if (saved) { state.result.slides[state.result.slides.findIndex((x) => x.slide === s.slide)] = saved; }
+        if (state.statuses[slideNum] === "auto") { state.statuses[slideNum] = "queued"; state.queue.push(slideNum); state.queue.sort((a, b) => a - b); state.skipped = state.skipped.filter((n) => n !== slideNum); state.skippedIndex = null; state.view = "queue"; state.current = state.queue.indexOf(slideNum); }
+        renderAll();
+      } catch (err) { toast("add figure failed: " + err.message); }
+    });
+    bar.appendChild(addBtn);
+  }
+  function markRowActive() {
+    document.querySelectorAll(".fig-row").forEach((r, i) => r.classList.toggle("active", i === state.selected));
+  }
+
+  // ═════════ renderers ═════════
+  function renderImage() {
+    const s = selectedSlide();
+    const img = $("#slideImage");
+    if (!s) { img.src = ""; return; }
+    img.src = `/api/jobs/${encodeURIComponent(jobId)}/slides/${s.slide}`;
+    img.alt = `Slide ${s.slide}`;
+    img.style.width = Math.round(state.zoom * 100) + "%";
+    $("#zoomLabel").textContent = Math.round(state.zoom * 100) + "%";
+    $("#slideIdLine").textContent = `slide ${s.slide} of ${state.result.slides.length}`;
+  }
+  function renderAll() {
+    const s = selectedSlide();
+    renderRail();
+    renderImage();
+    if (s) {
+      setEditorFromSlide(s);
+      renderFigureBar(s);
+      renderProgress();
+      drawOverlay(s);
+      const myImg = $("#slideImage");
+      myImg.onload = () => drawOverlay(s);
+    }
+  }
+
+  // ═════════ save flow ═════════
+  async function saveCurrent() {
+    const s = selectedSlide();
+    if (!s || $("#jsonEditor").disabled) return s;
+    const { parsed, ok, error } = tryParseEditor();
+    if (!ok) throw new Error("invalid JSON: " + error);
+    const figures = Array.isArray(parsed.figures) ? parsed.figures : [];
+    const tables = Array.isArray(parsed.tables) ? parsed.tables : [];
+    const savePayload = { figures, tables };
+    const { slide: saved } = await API(`/slides/${s.slide}`, { method: "PUT", body: JSON.stringify(savePayload) });
+    if (saved) state.result.slides[state.result.slides.findIndex((x) => x.slide === s.slide)] = saved;
+    state.dirty = false;
+    markValid(true, "valid");
+    return saved;
+  }
+  async function approveCurrent() {
+    // Save first, then call approve — two POST semantics to keep validations separate.
+    const saved = await saveCurrent();
+    if (!saved) return;
+    const { slide: approved } = await API(`/slides/${saved.slide}/approve`, { method: "POST", body: JSON.stringify({ figures: saved.figures ?? [], tables: saved.tables ?? [] }) });
+    if (approved) state.result.slides[state.result.slides.findIndex((x) => x.slide === approved.slide)] = approved;
+    const next = await API("", {});
+    if (next?.job) {
+      state.statuses = next.job.statuses ?? state.statuses;
+      state.queue = next.job.queue ?? state.queue;
+      state.skipped = next.job.skipped ?? state.skipped;
+      state.result = next.result ?? state.result;
+    }
+    renderAll();
+  }
+
+  $("#prevBtn").addEventListener("click", () => {
+    if (state.dirty && !confirm("Discard unsaved edits and go to previous slide?")) return;
+    if (state.view === "skipped") { state.view = "queue"; renderAll(); return; }
+    state.current = Math.max(0, state.current - 1); state.selected = null; renderAll();
+  });
+  $("#nextBtn").addEventListener("click", () => {
+    if (state.dirty && !confirm("Discard unsaved edits and go to next slide?")) return;
+    if (state.view === "skipped") { state.view = "queue"; renderAll(); return; }
+    state.current = Math.min(Math.max(0, state.queue.length - 1), state.current + 1); state.selected = null; renderAll();
+  });
+  $("#zoomIn").addEventListener("click", () => { state.zoom = Math.min(2.5, state.zoom + 0.25); renderImage(); const s = selectedSlide(); if (s) drawOverlay(s); });
+  $("#zoomOut").addEventListener("click", () => { state.zoom = Math.max(0.5, state.zoom - 0.25); renderImage(); const s = selectedSlide(); if (s) drawOverlay(s); });
+  $("#overlayToggle").addEventListener("click", () => { state.overlay = !state.overlay; $("#overlayToggle").textContent = state.overlay ? "◱ boxes" : "◱ boxes off"; drawOverlay(selectedSlide()); });
+  $("#drawToggle").addEventListener("click", () => { state.drawMode = !state.drawMode; $("#drawToggle").classList.toggle("active", state.drawMode); toast(state.drawMode ? "drag a box on the image for a new figure" : "draw mode off"); });
+  $("#resetBox").addEventListener("click", () => {
+    const s = selectedSlide(); const f = s?.figures?.[state.selected];
+    if (!s || !f) return;
+    const snap = state.bboxSnap?.[state.current]?.[state.selected];
+    if (!snap) return;
+    f.bbox = snap.slice(); f.bbox_source = "model"; delete f.bbox_locked;
+    editor.value = editorTextFor(s); state.dirty = true; renderFigureBar(s); drawOverlay(s);
+  });
+  $("#clearBox").addEventListener("click", () => {
+    const s = selectedSlide(); const f = s?.figures?.[state.selected];
+    if (!f) return;
+    delete f.bbox; delete f.bbox_source; delete f.bbox_locked;
+    editor.value = editorTextFor(s); state.dirty = true; renderFigureBar(s); drawOverlay(s);
+  });
+  $("#zoomPassBtn").addEventListener("click", async () => {
+    const s = selectedSlide(); const i = state.selected;
+    if (!s || i == null) return;
+    const btn = $("#zoomPassBtn"); btn.disabled = true; const original = btn.textContent; btn.textContent = "zooming…";
+    try {
+      const { slide: updated } = await API(`/slides/${s.slide}/zoom`, { method: "POST", body: JSON.stringify({ figureIndex: i }) });
+      state.result.slides[state.result.slides.findIndex((x) => x.slide === updated.slide)] = updated;
+      toast(`zoom merged (figure ${i + 1})`); renderAll();
+    } catch (err) { toast("zoom failed: " + err.message); } finally { btn.disabled = false; btn.textContent = original; }
+  });
+  $("#rerunBtn").addEventListener("click", async () => {
+    const s = selectedSlide();
+    if (!s) return;
+    if (state.dirty && !confirm("You have unsaved edits. Save and re-run all figures/tables?")) return;
+    const btn = $("#rerunBtn"); btn.disabled = true; const original = btn.innerHTML; btn.innerHTML = '<span class="spinner"></span>re-running…';
+    try {
+      const figureNotes = (s.figures ?? []).map((f, i) => ({ index: i, note: f.reviewer_note ?? "" })).filter((n) => String(n.note).trim());
+      const slideNote = $("#missingInput").value.trim();
+      const figureIndexes = state.selected != null ? [state.selected] : undefined;
+      const { slide: updated } = await API(`/slides/${s.slide}/rerun`, { method: "POST", body: JSON.stringify({ slideNote, figureNotes, ...(figureIndexes ? { figureIndexes } : {}) }) });
+      state.result.slides[state.result.slides.findIndex((x) => x.slide === updated.slide)] = updated;
+      $("#missingInput").value = "";
+      toast(`slide ${updated.slide} re-analyzed`);
+      renderAll();
+    } catch (err) { toast("re-run failed: " + err.message); } finally { btn.disabled = false; btn.innerHTML = original; }
+  });
+  $("#undoBtn").addEventListener("click", async () => {
+    const s = selectedSlide(); if (!s) return;
+    try {
+      const { slide: restored } = await API(`/slides/${s.slide}/undo-rerun`, { method: "POST", body: "{}" });
+      state.result.slides[state.result.slides.findIndex((x) => x.slide === restored.slide)] = restored;
+      toast("re-run undone"); renderAll();
+    } catch (err) { toast("undo failed: " + err.message); }
+  });
+  $("#approveBtn").addEventListener("click", async () => {
+    const s = selectedSlide(); if (!s) return;
+    try { await approveCurrent(); } catch (err) { toast("approve failed: " + err.message); }
+  });
+  $("#reopenBtn").addEventListener("click", async () => {
+    const s = selectedSlide(); if (!s) return;
+    try {
+      const { slide: reopened } = await API(`/slides/${s.slide}/reopen`, { method: "POST", body: "{}" });
+      state.statuses[s.slide] = "queued";
+      state.result.slides[state.result.slides.findIndex((x) => x.slide === s.slide)] = reopened?.main ?? reopened;
+      const next = await API("", {});
+      if (next?.job) { state.statuses = next.job.statuses ?? state.statuses; state.queue = next.job.queue ?? state.queue; state.skipped = next.job.skipped ?? state.skipped; state.result = next.result ?? state.result; }
+      renderAll();
+      toast("slide reopened");
+    } catch (err) { toast("reopen failed: " + err.message); }
+  });
+  $("#exportBtn").addEventListener("click", () => {
+    const s = state.result;
+    if (!s?.slides?.length) { toast("nothing to export"); return; }
+    const unreviewed = s.slides.filter((sl) => (state.statuses[sl.slide] ?? "queued") !== "approved" && !sl.failed).length;
+    if (unreviewed > 0 && !confirm(`${unreviewed} slide(s) not yet approved. Export anyway?`)) return;
+    location.href = `/api/jobs/${encodeURIComponent(jobId)}/export`;
+  });
+  window.addEventListener("beforeunload", (e) => { if (state.dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+  // ═════════ boot ═════════
+  (async () => {
+    try {
+      if (!jobId) throw new Error("missing ?id=<jobId>");
+      // First fetch: seed state.
+      const data = await API("", {});
+      state.result = data.result;
+      state.report = data.report;
+      state.statuses = data.job?.statuses ?? {};
+      state.queue = data.job?.queue ?? [];
+      state.skipped = data.job?.skipped ?? [];
+      $("#fileName").textContent = data.job?.input ?? "deck";
+
+      // Poll every 2s while the job is analyzing. Stops when we reach review/done/failed.
+      const tick = async () => {
+        try {
+          const fresh = await API("", {});
+          state.result = fresh.result ?? state.result;
+          state.report = fresh.report ?? state.report;
+          state.statuses = fresh.job?.statuses ?? state.statuses;
+          state.queue = fresh.job?.queue ?? state.queue;
+          state.skipped = fresh.job?.skipped ?? state.skipped;
+          const status = fresh.job?.status ?? "unknown";
+          const pill = $("#statusPill");
+          pill.textContent = status;
+          pill.className = "pill " + (status === "done" ? "done" : status === "failed" ? "failed" : "review");
+          const total = fresh.result?.slides?.length ?? 0;
+          const done = fresh.result?.slides?.filter((s) => s?.confidence || s?.issues?.length || s?.figures?.length || s?.tables?.length).length ?? 0;
+          $("#progressChip").textContent = `Analyzing ${done}/${total} slide${total === 1 ? "" : "s"}`;
+          $("#slideCounter").textContent = `${done}/${total}`;
+          if (fresh.job?.status === "failed") {
+            $("#boot").textContent = "job failed: " + (fresh.job.error ?? "unknown error");
+            $("#boot").style.color = "var(--red)";
+            return; // stop polling
+          }
+          if ((pill.textContent === "review" || pill.textContent === "done") && !showSkippedBackup) {
+            showAll();
+          }
+          if (fresh.job?.status !== "analyzing") { renderAll(); } else { renderRail(); renderProgress(); }
+          if (fresh.job?.status !== "analyzing" && fresh.job?.status !== "failed") return; // stop polling — entered review
+        } catch (err) {
+          console.warn("poll failed (continuing):", err.message);
+        }
+        setTimeout(tick, 2000);
+      };
+      let showSkippedBackup = false;
+      const showAll = () => { showSkippedBackup = true; };
+
+      // First paint: render whatever is in state already.
+      show("#boot", false);
+      renderAll();
+      // Kick off polling if not yet done.
+      if ($("#statusPill").textContent === "analyzing") setTimeout(tick, 2000);
+    } catch (err) { $("#boot").textContent = "could not load job: " + err.message; }
+  })();
+})();
+</script>
+</body>
+</html>

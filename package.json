@@ -4,7 +4,7 @@
   "description": "Document \u2192 structured JSON pipeline for born-digital and scanned PDFs and images.",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/",
+    "test": "sh scripts/run-tests.sh",
     "extract": "node src/cli.js",
     "setup": "node scripts/setup-venv.mjs",
     "ui": "node UI/server.mjs",

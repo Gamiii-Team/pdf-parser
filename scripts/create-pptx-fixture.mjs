@@ -126,6 +126,7 @@ add("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes
 <Default Extension="png" ContentType="image/png"/>
 <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
 ${slides.map((_, i) => `<Override PartName="/ppt/slides/slide${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`).join("\n")}
+<Override PartName="/ppt/notesSlides/notesSlide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
 </Types>`);
 add("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -149,6 +150,26 @@ add("ppt/slides/_rels/slide3.xml.rels", `<?xml version="1.0" encoding="UTF-8" st
 <Relationship Id="rEmbed1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/chart.png"/>
 </Relationships>`);
 add("ppt/media/chart.png", png);
+
+// Speaker notes for slide 2 (Monthly Figures) — not present in the rendered PDF,
+// so they exercise the native-hints path end to end.
+add("ppt/slides/_rels/slide2.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide2.xml"/>
+</Relationships>`);
+add("ppt/notesSlides/_rels/notesSlide2.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="../slides/slide2.xml"/>
+</Relationships>`);
+add("ppt/notesSlides/notesSlide2.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:notes ${NS_A} ${NS_R} ${NS_P}>
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes Placeholder"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+<p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="1600"/><a:t>Speaker notes: margins review quarterly; the table holds the estimated figures.</a:t></a:r></a:p></p:txBody></p:sp>
+</p:spTree></p:cSld>
+</p:notes>`);
 
 // ---------- minimal ZIP writer (deflate) ----------
 function buildZip(entries) {

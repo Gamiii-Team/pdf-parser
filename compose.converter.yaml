@@ -27,3 +27,21 @@ services:
     volumes:
       - ./data/convert:/job
     entrypoint: ["soffice"]
+  hints:
+    build:
+      context: .
+      dockerfile: docker/hints/Dockerfile
+    image: pdf-parser-hints:latest
+    network_mode: none
+    read_only: true
+    user: "10002"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    working_dir: /job
+    volumes:
+      - ./data/hints:/job:ro
+    entrypoint: ["python", "/opt/pptx_hints.py"]

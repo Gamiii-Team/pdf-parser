@@ -476,6 +476,7 @@ async function runPipeline() {
   if (state.demo) fd.append("demo", state.demo);
   if (state.file) fd.append("file", state.file, state.file.name);
   fd.append("modelBackend", $("#backend-select").value);
+  fd.append("mode", $("#mode-select").value);
   fd.append("forceVlm", String($("#opt-force-vlm").checked));
   fd.append("figurePass", String($("#opt-figure-pass").checked));
   fd.append("subjectDetect", String($("#opt-subject-detect").checked));
@@ -484,6 +485,26 @@ async function runPipeline() {
 
   try {
     const data = await api("/api/analyze", { method: "POST", body: fd });
+    if (data.mode === "vlm") {
+      // vlm mode runs asynchronously — poll the job until it reaches review or fails.
+      // No fixed cap: a 25-slide deck at ~2-3s/slide plus retries can legitimately exceed 10 min.
+      toast("vlm job accepted — analyzing slides as they arrive…");
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const { job } = await api(`/api/jobs/${encodeURIComponent(data.jobId)}`);
+        const status = job?.status ?? "unknown";
+        if (status === "review" || status === "done") break;
+        if (status === "failed") throw new Error(job.error ?? "vlm job failed");
+        // Surface live progress to the toast area so the user sees slides as they land.
+        const done = job?.progress?.done ?? null;
+        const total = job?.progress?.total ?? null;
+        if (done != null && total != null) {
+          $("#progressChip").textContent = `Analyzing ${done}/${total}`;
+        }
+      }
+      window.location.href = `/review.html?id=${encodeURIComponent(data.jobId)}`;
+      return;
+    }
     state.runId = data.runId;
     setOutput(data.manifest, data.report, null);
     refreshHistory();

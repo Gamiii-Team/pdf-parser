@@ -74,6 +74,13 @@
             <option value="modal">Modal vLLM — Qwen/Qwen3-VL-8B-Instruct-FP8</option>
           </select>
         </label>
+        <label class="select-wrap">
+          <span class="select-hint">mode</span>
+          <select id="mode-select" aria-label="analysis mode">
+            <option value="hybrid" selected>hybrid — text layer + targeted VLM (default, free text)</option>
+            <option value="vlm">full VLM — qwen reads every slide (PPTX only, spends tokens)</option>
+          </select>
+        </label>
         <p id="backend-note" class="backend-note"></p>
         <div id="env-helper" class="env-helper">
           <div class="env-head">

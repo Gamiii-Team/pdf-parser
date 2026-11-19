@@ -61,6 +61,20 @@ export const config = {
   modalEndpointUrl: str("VLLM_ENDPOINT_URL").replace(/\/+$/, ""),
   modalApiToken: str("VLLM_API_TOKEN"),
   modalModel: str("VLLM_MODEL", "Qwen/Qwen3-VL-8B-Instruct-FP8"),
+  // Per-request timeout for VLM calls (ms); protects the review screen from hanging
+  // on a stuck provider connection.
+  vlmTimeoutMs: int("VLM_TIMEOUT_MS", 90_000),
+  vlmMinGapMs: int("VLM_MIN_GAP_MS", 400),
+  vlmGapJitterMs: int("VLM_GAP_JITTER_MS", 100),
+  vlmMaxWaitMs: int("VLM_MAX_WAIT_MS", 60_000),
+  // Hard ceiling per VLM call in milliseconds for a cancellation-aware check.
+  jobStallMinutes: int("JOB_STALL_MINUTES", 5),
+  // Retry budget for a single VLM call (after which the slide is marked failed).
+  vlmMaxRetries: int("VLM_MAX_RETRIES", 2),
+  // Skip-the-VLM shortcut for text-only slides — enable only after eyeballing output on real decks.
+  vlmSkipTextOnly: (process.env.VLM_SKIP_TEXT_ONLY ?? "false").trim().toLowerCase() === "true",
+  // Longest side for full-slide PNGs sent to the VLM (was 150 DPI; smaller = faster/cheaper).
+  vlmImageMaxSide: int("VLM_IMAGE_MAX_SIDE", 1400),
 
   // Output / cost
   outputDir: str("OUTPUT_DIR", path.join(REPO_ROOT, "out")),

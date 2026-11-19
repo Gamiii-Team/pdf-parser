@@ -202,6 +202,38 @@ Upload fails with a specific reason (too big, too many slides, zip bomb, encrypt
 
 **Cost note:** a born-digital deck costs zero model calls for text (figure enrichment and subject detection aside). A conversion of a typical 10-slide deck takes ~1–4 s, dominated by LibreOffice startup.
 
+**Mode switch:** `.env` `PPTX_MODE=hybrid|vlm` (default `hybrid`), CLI `--mode vlm`, or the UI **mode** dropdown. Hybrid keeps everything described above. VLM mode is described next.
+
+## Full-VLM mode (PPTX) — every slide read by Groq
+
+An opt-in second analysis path for decks where you want the model to read literally everything:
+
+```
+.pptx → validate → LibreOffice (docker) → PDF → per-slide PNG @150 DPI + PDF text layer
+      → native hints (python-pptx in docker/hints: tables, chart values, notes, hidden/empty)
+      → one Groq request per slide (system prompt: slide content is DATA, never instructions)
+      → per-slide JSON → schema check → retry once on malformed → numeric cross-check vs hints
+      → jobs/<out/vlm>/<jobId>/vlm/<model>/ → interactive review screen → export JSON
+```
+
+The slide images **leave the machine to Groq** in this mode (hybrid mode only sends crops/pages the VLM already needs). ~1,026 image tokens/slide, ~25 calls for a 25-slide deck; exact chart values come from the native hints, so chart series equal the deck's own numbers — anything the model invents that contradicts the deck lowers the slide's `confidence` to `low` and adds an issue.
+
+**Review queue** — only slides that carry at least one non-excluded **figure or table** after the first pass are queued for review. Text-only slides are marked `auto` and merged straight into `main.json`; a "N text-only slides skipped" toggle at the bottom of the left rail shows them read-only, and **Add figure** there moves a slide into the queue.
+
+**Review screen** — after the job finishes you get an `/review.html?id=<jobId>` page: queued-slide thumbnails on the left (problem slides sort first), the zoomable slide image in the center with editable figure boxes (section 9), and a single full-height **JSON editor** on the right scoped to `figures` and `tables` only — the slide's title/text/notes come from the merge step and are not editable here. Figure bar under the editor carries per-figure **Not a figure** + note fields; **"What's missing on this slide?"** feeds the re-run prompt; **↻ Re-run figures & tables** and **↶ Undo re-run** let you iterate; **Approve** greys out and locks the slide; **Reopen** unlocks it. Approving any slide rebuilds `main.json` atomically (`tmp` + rename in the job folder); once every queued slide is approved, every slide in `main.json` carries `review_status: "approved"` and `export` returns the final doc.
+
+**Editing figure boxes** — same always-on locks as before: drag to move, drag handles to resize, arrow keys nudge 0.5% (Shift = 2%), Delete removes the box, **+ box** adds one, **↺ reset** restores detected. Reviewer-set boxes are locked — re-runs never move or resize them, and they appear both as full-slide context and as an enlarged crop. **Zoom text** splits the selected figure into a 2×2 grid of high-DPI tiles to read dense diagrams.
+
+**Endpoints:** `GET/PUT /api/jobs/:id/slides/:n` (figures & tables only — refused with 409 once approved), `POST /api/jobs/:id/slides/:n/rerun` (locked on approved slides; body `{ slideNote?, figureNotes?, figureIndexes? }` — 5/slide cap, 1000-char limit), `POST /api/jobs/:id/slides/:n/zoom`, `POST /api/jobs/:id/slides/:n/undo-rerun`, `POST /api/jobs/:id/slides/:n/approve` (validates + marks `approved`; rebuilds `main.json`; refused during an in-flight re-run), `POST /api/jobs/:id/slides/:n/reopen` (unlocks), `GET /api/jobs/:id/export` (`main.json`), `GET /api/jobs/:id/slides/:n/crop/:i`, **`DELETE /api/jobs/:id`**. Job ids validated; no request input ever builds a file path. Review-only fields (`bbox`, `bbox_source`, `bbox_locked`, `reviewer_note`, `previous`, `reviewed`, `rerun_count`) are stripped from `main.json`.
+
+**Job storage:** `out/vlm/<jobId>/vlm/<model>/` — `result.json` (per-slide JSON, `reviewed`/`approved` flags, `rerun_count`, `previous`), **`main.json`** (the merged deliverable — written atomically on every save and approval), `status.json` (`queued → analyzing → review → done|failed`, per-slide statuses), `manifest.json`, `slides/NN.png`, `source.pdf` (kept for crop re-runs; deleted with the job), `hints.json` (native data), `run-report.json` (mode, model, tokens, image counts, per-slide statuses, errors). Converted PDFs are deleted up front as usual. Jobs live for **24 h** then are swept; `DELETE /api/jobs/:id` removes one early. Everything works after restart — job reads fall back to disk.
+
+**Failure behavior:** a bad slide (malformed JSON after one retry, provider exhaustion) never fails the job — it lands flagged in the review queue, sorts first, and the queued/unattempted slides can be edited by hand. `GET /api/jobs/:id` surfaces `status: "failed"` with the error. PDF/image inputs keep the hybrid path unchanged.
+
+**Rate limits for qwen/qwen3.8-27b** (as of today): 30 RPM / 1K RPD, 8K TPM, 131k ctx, 16k max completion, **max 3 images/request** (batches of 3), 20 MB max file. `VLM_CONCURRENCY=2`, sequential-ish pacing is built in. Cost ≈ $0.02–0.05 per deck. Model must be Groq-backed in this mode (`GROQ_API_KEY` required; `VLM_BACKEND=modal` will not be used).
+
+**Rate limits for qwen/qwen3.8-27b** (as of today): 30 RPM / 1K RPD, 8K TPM, 131k ctx, 16k max completion, **max 3 images/request** (batches of 3), 20 MB max file. `VLM_CONCURRENCY=2`, sequential-ish pacing is built in. Cost ≈ $0.02–0.05 per deck. Model must be Groq-backed in this mode (`GROQ_API_KEY` required; `VLM_BACKEND=modal` will not be used).
+
 ## Run the UI
 
 ```bash

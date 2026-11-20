@@ -495,11 +495,24 @@ async function runPipeline() {
         const status = job?.status ?? "unknown";
         if (status === "review" || status === "done") break;
         if (status === "failed") throw new Error(job.error ?? "vlm job failed");
-        // Surface live progress to the toast area so the user sees slides as they land.
-        const done = job?.progress?.done ?? null;
-        const total = job?.progress?.total ?? null;
-        if (done != null && total != null) {
-          $("#progressChip").textContent = `Analyzing ${done}/${total}`;
+        // Surface live progress in the loading pane so the user sees slides as they land.
+        const prog = job?.progress ?? null;
+        const row = $("#pbarRow");
+        if (prog) {
+          row.hidden = false;
+          clearInterval(loadingTimer); // stop the rotating placeholder text
+          const stage = prog.stage ?? status;
+          const fill = $("#pbarFill");
+          if ((prog.total ?? 0) > 0 && stage === "analyzing") {
+            $("#pbar").classList.remove("indeterminate");
+            fill.style.width = `${Math.min(100, Math.round((prog.done / prog.total) * 100))}%`;
+            $("#loading-line").textContent = `analyzing slides… ${prog.done}/${prog.total}`;
+          } else {
+            $("#pbar").classList.add("indeterminate");
+            fill.style.width = "0%";
+            $("#loading-line").textContent = stage === "merging" ? "merging results…" : stage === "converting" ? "converting deck…" : "starting…";
+          }
+          $("#pbarEta").textContent = prog.etaText ?? "";
         }
       }
       window.location.href = `/review.html?id=${encodeURIComponent(data.jobId)}`;

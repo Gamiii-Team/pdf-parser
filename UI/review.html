@@ -34,6 +34,10 @@ header.topbar { display: flex; align-items: center; gap: 14px; padding: 10px 18p
 .pill.review { color: var(--amber); border-color: rgba(245,166,35,.4); background: var(--amber-soft); }
 .pill.failed { color: var(--red); border-color: rgba(248,113,113,.4); }
 .pill.done { color: var(--green); border-color: rgba(52,211,153,.4); }
+.jobbar { position: absolute; top: 0; left: 0; right: 0; height: 3px; background: transparent; }
+.jobbar-fill { height: 100%; width: 0%; background: var(--amber); transition: width .4s ease; }
+.jobbar.indeterminate .jobbar-fill { width: 35%; animation: jobbar-slide 1.2s ease-in-out infinite; }
+@keyframes jobbar-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
 .spacer { flex: 1; }
 .nav-btn { width: 30px; height: 30px; border-radius: 6px; border: 1px solid var(--border-strong); background: transparent; color: var(--text); }
 .nav-btn:hover { border-color: var(--amber); color: var(--amber); }
@@ -81,11 +85,24 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
 #jsonEditor { width: 100%; height: 100%; min-height: 200px; resize: none; border: 0; outline: none; background: #101010; color: var(--text); font-family: var(--mono); font-size: 12.5px; line-height: 1.55; padding: 12px 14px; white-space: pre; overflow: auto; }
 .figure-bar { max-height: 190px; overflow-y: auto; border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; }
 .figure-bar:empty { display: none; }
+.grounding { border-top: 1px solid var(--border); padding: 8px 10px 10px; max-height: 190px; overflow-y: auto; font-family: var(--mono); font-size: 0.68rem; }
+.grounding[hidden] { display: none; }
+.grounding .g-head { display: flex; align-items: center; gap: 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 5px; }
+.grounding .g-text { color: var(--text); line-height: 1.5; margin-bottom: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.grounding .g-evidence { display: flex; flex-wrap: wrap; gap: 4px; }
+.grounding .g-chip { border: 1px solid var(--border-strong); border-radius: 4px; padding: 1px 5px; color: var(--amber); background: var(--amber-soft); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; }
+.grounding .g-flag { border: 1px solid rgba(248,113,113,.4); color: var(--red); border-radius: 4px; padding: 1px 5px; cursor: help; }
+.grounding .g-ok { color: var(--green); }
 .fig-row { display: grid; grid-template-columns: 108px 44px 1fr auto; gap: 6px; align-items: center; font-size: 0.78rem; border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
 .fig-row.excluded { opacity: 0.45; }
 .fig-row.active { border-color: var(--amber); }
 .fig-row .ft { font-family: var(--mono); font-size: 0.62rem; color: var(--amber); text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fig-row .ft b { color: var(--text); text-transform: none; display: block; }
+.fig-note { font-family: var(--mono); font-size: 0.58rem; color: #fca5a5; border: 1px solid rgba(248,113,113,.35); border-radius: 4px; padding: 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; cursor: help; }
+.issues-panel { width: 100%; max-width: 860px; display: flex; flex-direction: column; gap: 4px; font-family: var(--mono); font-size: 0.68rem; }
+.issues-panel .issue { padding: 5px 8px; border: 1px solid rgba(248,113,113,.25); border-left: 3px solid var(--red); border-radius: 6px; background: rgba(248,113,113,.06); color: #fca5a5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.issues-panel .issue.warn { border-color: rgba(245,166,35,.25); border-left-color: var(--amber); background: var(--amber-soft); color: var(--amber); }
+.issues-panel .issue b { text-transform: uppercase; letter-spacing: 0.06em; margin-right: 6px; }
 .fig-row input[type="text"] { background: #101010; border: 1px solid var(--border-strong); color: var(--text); border-radius: 4px; padding: 3px 6px; font-size: 0.72rem; width: 100%; }
 .crop { width: 44px; height: 54px; object-fit: cover; object-position: top center; border-radius: 3px; border: 1px solid var(--border-strong); background: #111; }
 .fig-actions { display: flex; flex-direction: column; gap: 3px; align-items: end; }
@@ -112,6 +129,7 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
 </style>
 </head><body>
 <header class="topbar">
+  <div class="jobbar" id="jobBar" hidden><div class="jobbar-fill" id="jobBarFill"></div></div>
   <a class="back" href="/">← back</a>
   <span class="file-name" id="fileName">loading…</span>
   <button class="nav-btn" id="prevBtn" aria-label="previous slide">‹</button>
@@ -120,6 +138,7 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
   <span class="pill review" id="statusPill">review</span>
   <span class="spacer"></span>
   <span class="chip" id="progressChip"></span>
+  <button class="btn ghost" id="translateAllBtn" type="button" title="Translate all approved slides into English">🌐 Translate all</button>
   <button class="btn ok" id="exportBtn" disabled>Export JSON</button>
 </header>
 
@@ -142,21 +161,24 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
       <button id="zoomPassBtn" aria-label="zoom pass on selected figure">🔍 zoom text</button>
       <span id="slideIdLine" class="status-line"></span>
     </div>
+    <div id="issuesPanel" class="issues-panel" hidden></div>
   </section>
   <aside class="editor" id="editor">
-    <div class="editor-head"><h2>Slide <span id="slideNum">–</span> · <span id="slideTitle">(loading)</span><span class="lock-note" id="approvedNote"></span></h2></div>
+    <div class="editor-head"><h2>Slide <span id="slideNum">–</span> · <span id="slideTitle">(loading)</span><span class="lock-note" id="approvedNote"></span><span class="lock-note" id="translateNote" style="margin-left:6px"></span></h2></div>
     <div class="editor-head" style="border-top:0; border-bottom:1px solid var(--border); padding-top:0; justify-content:flex-start; gap:8px">
       <h2 style="font-size:0.7rem">JSON — figures &amp; tables only</h2>
       <span id="jsonValid" style="margin-left:auto; font-family:var(--mono); font-size:0.68rem; color:var(--green)">valid</span>
     </div>
     <textarea id="jsonEditor" spellcheck="false" aria-label="Slide figures and tables JSON"></textarea>
     <div class="figure-bar" id="figureBar"></div>
+    <div class="grounding" id="groundingPanel" hidden aria-live="polite"></div>
     <div class="missing-row">
       <input type="text" id="missingInput" placeholder="What's missing on this slide? (e.g. there is a pie chart bottom-right)" aria-label="What is missing on this slide" />
     </div>
     <div class="btn-row">
       <button class="btn ghost" id="rerunBtn" type="button">↻ Re-run figures &amp; tables</button>
       <button class="btn ghost" id="undoBtn" type="button">↶ Undo re-run</button>
+      <button class="btn ghost" id="translateBtn" type="button" title="Send this slide back to the VLM: translate title/subtitle/text/notes and explain each figure in English">🌐 Translate to English</button>
       <button class="btn primary" id="approveBtn" type="button" style="margin-left:auto">Approve ✓</button>
     </div>
     <div class="btn-row" style="border-top:0; padding-top:0; justify-content:center; margin-top:-4px">
@@ -168,7 +190,8 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
 <div class="loading" id="boot">loading job…</div>
 <div class="toast" id="toast"></div>
 
-<script>
+<script type="module">
+import { summarizeSlide, badgeLabels, figureNoteLabel } from "./js/labels.js";
 (() => {
   "use strict";
   const $ = (s) => document.querySelector(s);
@@ -193,6 +216,7 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
     result: null, report: null,
     // per-slide state from the server job response
     statuses: {},     // n -> "auto" | "queued" | "approved" | "failed"
+    translations: {}, // n -> { state: "translating"|"translated"|"translate_failed", ... }
     queue: [],        // queued slide numbers in order
     skipped: [],      // auto slide numbers
     view: "queue",    // "queue" | "skipped"
@@ -233,9 +257,12 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
   // ═════════ rail rendering ═════════
   function badgesFor(slide) {
     const b = [];
-    if (slide?.failed) b.push(el("span", "badge failed", "failed"));
-    if ((slide?.confidence ?? "medium") === "low") b.push(el("span", "badge low", "low"));
-    if (slide?.issues?.length) b.push(el("span", "badge issues", `issues ×${slide.issues.length}`));
+    // Descriptive badges: short text on the pill, full reason in the tooltip.
+    for (const bl of badgeLabels(slide)) {
+      const badge = el("span", bl.cls, bl.text);
+      badge.title = bl.title;
+      b.push(badge);
+    }
     const status = state.statuses[slide?.slide];
     if (status === "approved") b.push(el("span", "badge reviewed", "✓ approved"));
     else if (status === "queued") b.push(el("span", "queue-badge", "queued"));
@@ -322,14 +349,47 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
     $("#clearBox").disabled = state.selected == null;
     $("#slideNum").textContent = s ? s.slide : "–";
     $("#slideTitle").textContent = s ? (s.title ?? "(unnamed)") : "";
+    // Issues strip — the full reasons behind the rail badges, on the slide itself.
+    const panel = $("#issuesPanel");
+    panel.innerHTML = "";
+    if (s) {
+      const sum = summarizeSlide(s);
+      const rows = sum.issues.map((i) => ({ warn: i.kind === "zoom" || i.kind === "hints", ...i }));
+      if (sum.failed && !sum.issues.length) rows.push({ kind: "vlm", short: sum.failed.short, detail: sum.failed.detail, warn: false });
+      if (sum.low && !sum.issues.length) rows.push({ kind: "low", short: sum.low.short, detail: sum.low.detail, warn: true });
+      for (const r of rows) {
+        const div = el("div", "issue" + (r.warn ? " warn" : ""));
+        div.append(el("b", null, r.short), document.createTextNode(r.detail));
+        panel.appendChild(div);
+      }
+      panel.hidden = rows.length === 0;
+    } else {
+      panel.hidden = true;
+    }
     const approved = s && state.statuses[s.slide] === "approved";
     const isSkipped = state.view === "skipped" && s && (state.statuses[s.slide] === "auto" || !state.statuses[s.slide]);
     $("#approvedNote").textContent = approved ? "APPROVED — locked" : (isSkipped ? "text-only — read-only until a figure is added" : "");
+    // Translation status (persisted server-side, incl. text-only slides)
+    const tr = state.translations?.[s?.slide];
+    const tNote = $("#translateNote");
+    if (tr?.state === "translating") {
+      tNote.innerHTML = '<span class="spinner"></span>translating…';
+      tNote.style.color = "var(--amber)";
+    } else if (tr?.state === "translate_failed") {
+      tNote.textContent = "translation failed — retry";
+      tNote.style.color = "var(--red)";
+    } else if (s?.translated || tr?.state === "translated") {
+      tNote.textContent = "translated ✓";
+      tNote.style.color = "var(--green)";
+    } else {
+      tNote.textContent = "";
+    }
     // Skipped text-only slides don't get an Approve button (nothing to approve)
     $("#approveBtn").disabled = Boolean(approved) || Boolean(isSkipped);
     $("#approveBtn").textContent = approved ? "Approved ✓" : (isSkipped ? "Add a figure to review" : "Approve ✓");
     $("#reopenBtn").style.display = approved ? "" : "none";
     $("#rerunBtn").disabled = Boolean(approved) || Boolean(isSkipped);
+    $("#translateBtn").disabled = !approved || Boolean(isSkipped);
     $("#jsonEditor").disabled = Boolean(approved) || Boolean(isSkipped);
     $("#missingInput").disabled = Boolean(approved) || Boolean(isSkipped);
   }
@@ -536,6 +596,36 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
   });
 
   // ═════════ figure bar ═════════
+  // Grounding detail for the selected figure: the explanation plus the exact
+  // document strings that back it, and a flag when a claim cannot be grounded.
+  function renderGrounding(s) {
+    const panel = $("#groundingPanel");
+    panel.innerHTML = "";
+    const f = s?.figures?.[state.selected];
+    if (!f || f.excluded || (!f.description && !(f.explanation_evidence ?? []).length)) { panel.hidden = true; return; }
+    panel.hidden = false;
+    const head = el("div", "g-head");
+    head.append(document.createTextNode(`Figure ${state.selected + 1} · explanation`));
+    const audit = f.explanation_audit;
+    if (audit && !audit.ok) {
+      const bad = [...(audit.ungrounded ?? []), ...(audit.flaggedProperNouns ?? [])];
+      const flag = el("span", "g-flag", `⚠ ${bad.length} ungrounded`);
+      flag.title = bad.join(" · ");
+      head.appendChild(flag);
+    } else if (audit?.ok) {
+      head.appendChild(el("span", "g-ok", "grounded"));
+    }
+    panel.appendChild(head);
+    panel.appendChild(el("div", "g-text", f.description ?? ""));
+    const ev = el("div", "g-evidence");
+    for (const item of f.explanation_evidence ?? []) {
+      const chip = el("span", "g-chip", item);
+      chip.title = item;
+      ev.appendChild(chip);
+    }
+    panel.appendChild(ev);
+  }
+
   function renderFigureBar(s) {
     const bar = $("#figureBar");
     bar.innerHTML = "";
@@ -547,6 +637,12 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
       const t2 = el("b", null, String(f.title ?? f.description ?? "unnamed").slice(0, 48));
       titleEl.append(`${i + 1} · ${f.type ?? "?"}`, t2);
       meta.appendChild(titleEl);
+      const fl = figureNoteLabel(f.notes);
+      if (fl) {
+        const chip = el("span", "fig-note", fl.short);
+        chip.title = fl.detail;
+        meta.appendChild(chip);
+      }
       const note = el("input");
       note.type = "text";
       note.placeholder = "note (e.g. chart has 5 bars)";
@@ -568,9 +664,32 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
       chkLabel.append(chk, el("span", null, "not a figure"));
       const actions = el("div", "fig-actions");
       actions.appendChild(chkLabel);
+      if (!f.excluded) {
+        const reBtn = el("button", "mini", "re-read");
+        reBtn.type = "button";
+        reBtn.title = "Re-read this figure and explain it using only the fed document context";
+        reBtn.disabled = state.statuses[s.slide] === "approved";
+        reBtn.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          reBtn.disabled = true; const old = reBtn.textContent; reBtn.textContent = "…";
+          try {
+            const { figure: updated, audit } = await API(`/slides/${s.slide}/figures/${i}/reextract-text`, { method: "POST", body: "{}" });
+            if (updated) {
+              const host = state.result.slides.find((x) => x.slide === s.slide);
+              if (host?.figures) host.figures[i] = updated;
+              const bad = ((audit?.ungrounded ?? []).length + (audit?.flaggedProperNouns ?? []).length);
+              toast(bad ? `re-read · ${bad} ungrounded term(s) flagged` : "figure re-read · grounded");
+              renderAll();
+            }
+          } catch (err) { toast("re-read failed: " + err.message); }
+          finally { reBtn.disabled = false; reBtn.textContent = old; }
+        });
+        actions.appendChild(reBtn);
+      }
       row.append(meta, crop, note, actions);
       bar.appendChild(row);
     });
+    renderGrounding(s);
     // $add figure — for skipped slides (and as an "Add figure" affordance on queued slides that want one)
     const addBtn = el("button", "mini", "+ Add figure");
     addBtn.type = "button";
@@ -632,20 +751,37 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
     markValid(true, "valid");
     return saved;
   }
+  // Apply a GET /api/jobs/:id response to local state (including translation state).
+  function syncFromJob(data) {
+    if (!data?.job) return;
+    state.statuses = data.job.statuses ?? state.statuses;
+    state.translations = data.job.translations ?? state.translations;
+    state.queue = data.job.queue ?? state.queue;
+    state.skipped = data.job.skipped ?? state.skipped;
+    state.result = data.result ?? state.result;
+  }
+
   async function approveCurrent() {
     // Save first, then call approve — two POST semantics to keep validations separate.
     const saved = await saveCurrent();
     if (!saved) return;
     const { slide: approved } = await API(`/slides/${saved.slide}/approve`, { method: "POST", body: JSON.stringify({ figures: saved.figures ?? [], tables: saved.tables ?? [] }) });
     if (approved) state.result.slides[state.result.slides.findIndex((x) => x.slide === approved.slide)] = approved;
-    const next = await API("", {});
-    if (next?.job) {
-      state.statuses = next.job.statuses ?? state.statuses;
-      state.queue = next.job.queue ?? state.queue;
-      state.skipped = next.job.skipped ?? state.skipped;
-      state.result = next.result ?? state.result;
-    }
+    syncFromJob(await API("", {}));
     renderAll();
+    // Translation runs in the background on approve — poll until it settles so the
+    // review page refreshes with the English content once it lands in the manifest.
+    const target = saved.slide;
+    for (let i = 0; i < 40; i += 1) { // up to ~80s
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const fresh = await API("", {});
+        syncFromJob(fresh);
+        const tr = state.translations?.[target];
+        renderAll();
+        if (tr && (tr.state === "translated" || tr.state === "translate_failed")) break;
+      } catch { /* keep polling */ }
+    }
   }
 
   $("#prevBtn").addEventListener("click", () => {
@@ -686,6 +822,28 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
       toast(`zoom merged (figure ${i + 1})`); renderAll();
     } catch (err) { toast("zoom failed: " + err.message); } finally { btn.disabled = false; btn.textContent = original; }
   });
+  $("#translateBtn").addEventListener("click", async () => {
+    const s = selectedSlide();
+    if (!s) return;
+    const btn = $("#translateBtn"); btn.disabled = true; const original = btn.innerHTML; btn.innerHTML = '<span class="spinner"></span>translating…';
+    try {
+      const { slide: updated, translated, failures } = await API(`/slides/${s.slide}/translate-figures`, { method: "POST", body: JSON.stringify({}) });
+      state.result.slides[state.result.slides.findIndex((x) => x.slide === updated.slide)] = updated;
+      syncFromJob(await API("", {}));
+      toast(`translated ${translated} field(s)${failures?.length ? ` · ${failures.length} failed` : ""}`);
+      renderAll();
+    } catch (err) { toast("translate failed: " + err.message); } finally { btn.disabled = false; btn.innerHTML = original; }
+  });
+  $("#translateAllBtn").addEventListener("click", async () => {
+    const btn = $("#translateAllBtn"); btn.disabled = true; const original = btn.innerHTML; btn.innerHTML = '<span class="spinner"></span>translating…';
+    try {
+      const { queued, results, error } = await API("/translate-all", { method: "POST", body: JSON.stringify({}) });
+      if (error) throw new Error(error);
+      syncFromJob(await API("", {}));
+      toast(queued ? `translated ${queued} approved slide(s)` : "nothing to translate");
+      renderAll();
+    } catch (err) { toast("translate all failed: " + err.message); } finally { btn.disabled = false; btn.innerHTML = original; }
+  });
   $("#rerunBtn").addEventListener("click", async () => {
     const s = selectedSlide();
     if (!s) return;
@@ -721,7 +879,7 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
       state.statuses[s.slide] = "queued";
       state.result.slides[state.result.slides.findIndex((x) => x.slide === s.slide)] = reopened?.main ?? reopened;
       const next = await API("", {});
-      if (next?.job) { state.statuses = next.job.statuses ?? state.statuses; state.queue = next.job.queue ?? state.queue; state.skipped = next.job.skipped ?? state.skipped; state.result = next.result ?? state.result; }
+      syncFromJob(next);
       renderAll();
       toast("slide reopened");
     } catch (err) { toast("reopen failed: " + err.message); }
@@ -741,22 +899,16 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
       if (!jobId) throw new Error("missing ?id=<jobId>");
       // First fetch: seed state.
       const data = await API("", {});
-      state.result = data.result;
+      syncFromJob(data);
       state.report = data.report;
-      state.statuses = data.job?.statuses ?? {};
-      state.queue = data.job?.queue ?? [];
-      state.skipped = data.job?.skipped ?? [];
       $("#fileName").textContent = data.job?.input ?? "deck";
 
       // Poll every 2s while the job is analyzing. Stops when we reach review/done/failed.
       const tick = async () => {
         try {
           const fresh = await API("", {});
-          state.result = fresh.result ?? state.result;
+          syncFromJob(fresh);
           state.report = fresh.report ?? state.report;
-          state.statuses = fresh.job?.statuses ?? state.statuses;
-          state.queue = fresh.job?.queue ?? state.queue;
-          state.skipped = fresh.job?.skipped ?? state.skipped;
           const status = fresh.job?.status ?? "unknown";
           const pill = $("#statusPill");
           pill.textContent = status;
@@ -774,6 +926,24 @@ section.viewer { overflow: auto; display: flex; flex-direction: column; align-it
             showAll();
           }
           if (fresh.job?.status !== "analyzing") { renderAll(); } else { renderRail(); renderProgress(); }
+          // Global progress hairline + ETA while the deck is still processing.
+          const prog = fresh.job?.progress ?? null;
+          const jb = $("#jobBar");
+          if (prog && (status === "analyzing" || status === "converting" || status === "queued")) {
+            const stage = prog.stage ?? status;
+            jb.hidden = false;
+            if ((prog.total ?? 0) > 0 && stage === "analyzing") {
+              jb.classList.remove("indeterminate");
+              $("#jobBarFill").style.width = `${Math.min(100, Math.round((prog.done / prog.total) * 100))}%`;
+              $("#progressChip").textContent = `Analyzing ${prog.done}/${prog.total} · ${prog.etaText ?? "estimating…"}`;
+            } else {
+              jb.classList.add("indeterminate");
+              $("#jobBarFill").style.width = "0%";
+              $("#progressChip").textContent = stage === "merging" ? "merging results…" : stage === "converting" ? "converting deck…" : "starting…";
+            }
+          } else {
+            jb.hidden = true;
+          }
           if (fresh.job?.status !== "analyzing" && fresh.job?.status !== "failed") return; // stop polling — entered review
         } catch (err) {
           console.warn("poll failed (continuing):", err.message);

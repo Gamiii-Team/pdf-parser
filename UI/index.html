@@ -144,6 +144,10 @@ VLLM_API_TOKEN=&lt;MODAL_API_SECRET from the florence-api secret&gt;</pre>
       <!-- loading -->
       <div id="loading" class="loading hidden" aria-live="polite">
         <div class="spinner"></div>
+        <div class="pbar-row" id="pbarRow" hidden>
+          <div class="pbar" id="pbar"><div class="pbar-fill" id="pbarFill"></div></div>
+          <span class="pbar-eta" id="pbarEta"></span>
+        </div>
         <p id="loading-line" class="loading-line">running pipeline…</p>
         <div class="skel skel-wide"></div>
         <div class="skel"></div>

@@ -26,24 +26,26 @@ function retryAfterMsFromHeaders(headers) {
   return null;
 }
 
-export function makeGroqAdapter() {
+export function makeGroqAdapter({ client: injectedClient } = {}) {
   const { groqApiKey, groqModel } = config;
   if (!groqApiKey) throw new Error("GROQ_API_KEY is not set");
 
-  const client = new Groq({ apiKey: groqApiKey });
+  const client = injectedClient ?? new Groq({ apiKey: groqApiKey });
 
-  async function call(messages, { maxTokens = 8192, temperature = 0.1, withReasoningEffort } = {}, timeoutMs) {
-    const body = {
-      model: groqModel,
-      messages,
-      max_completion_tokens: maxTokens,
-      stream: false,
-      response_format: { type: "json_object" },
-      temperature,
-      top_p: 1,
-    };
-    if (withReasoningEffort) body.reasoning_effort = "low";
-    return client.chat.completions.create(body, timeoutMs ? { timeout: timeoutMs } : undefined);
+  // On a 429, retry once at the pacer cadence (VLM_429_MIN_GAP_MS, default 400 ms,
+  // same scale as the inter-request gap) without pausing every worker. Only if it
+  // keeps failing (or the server sent Retry-After) do we fall through to the pacer's
+  // global cool-down + withRetry's exponential backoff.
+  const RATE_LIMIT_MIN_GAP_MS = config.vlm429MinGapMs ?? 400;
+  const RATE_LIMIT_MAX_ATTEMPTS = Math.max(0, config.vlm429MaxAttempts ?? 1);
+
+  async function callOnce(messages, opts, timeoutMs) {
+    const trimmed = trimImages(messages);
+    const resp = await client.chat.completions.create(
+      { ...buildBody(trimmed, opts), model: groqModel },
+      timeoutMs ? { timeout: timeoutMs } : undefined,
+    );
+    return resp;
   }
 
   return {
@@ -53,40 +55,71 @@ export function makeGroqAdapter() {
       // Pacer — every VLM request passes through the shared choke point.
       await pacer.waitForSlot();
       const timeoutMs = timeout ?? config.vlmTimeoutMs ?? 90000;
+      let rateLimitAttempts = 0;
       return withRetry(
         async () => {
-          // Strip images past the per-request cap
-          const trimmed = trimImages(messages);
-          let resp;
           try {
-            resp = await call(trimmed, { maxTokens, temperature, withReasoningEffort: true }, timeoutMs);
+            const resp = await callOnce(messages, { maxTokens, temperature, withReasoningEffort: true }, timeoutMs);
+            return toResult(resp);
           } catch (err) {
-            const msg = String(err?.message ?? err);
-            if (is429(err) || /reasoning_effort/i.test(msg)) {
-              if (is429(err)) {
-                // Global cool-down — every worker pauses together.
-                const retryAfterMs = retryAfterMsFromHeaders(err?.headers) ?? err?.retryAfterMs ?? null;
-                pacer.noteRateLimit({ retryAfterMs, reason: "429", tag: "groq" });
-                throw err;
+            if (is429(err)) {
+              rateLimitAttempts += 1;
+              const retryAfterMs = retryAfterMsFromHeaders(err?.headers) ?? err?.retryAfterMs ?? null;
+              if (retryAfterMs) err.retryAfterMs = retryAfterMs;
+              if (rateLimitAttempts <= RATE_LIMIT_MAX_ATTEMPTS && !retryAfterMs) {
+                // Gentle first retry at the pacer cadence (~400 ms) — the server
+                // asked for a slowdown, not a stop, so don't pause every worker.
+                const gap = Math.max(RATE_LIMIT_MIN_GAP_MS, pacer.msUntilNextStart());
+                await sleep(gap);
+                await pacer.waitForSlot();
+                const resp = await callOnce(messages, { maxTokens, temperature, withReasoningEffort: true }, timeoutMs);
+                return toResult(resp);
               }
-              resp = await call(trimmed, { maxTokens, temperature, withReasoningEffort: false }, timeoutMs);
-            } else {
+              // Retry-After present, or gentle retries exhausted: global cool-down,
+              // then let withRetry's exponential backoff take over.
+              pacer.noteRateLimit({ retryAfterMs, reason: "429", tag: "groq" });
               throw err;
             }
+            if (/reasoning_effort/i.test(String(err?.message ?? err))) {
+              const resp = await callOnce(messages, { maxTokens, temperature, withReasoningEffort: false }, timeoutMs);
+              return toResult(resp);
+            }
+            throw err;
           }
-          const choice = resp?.choices?.[0];
-          return {
-            text: choice?.message?.content ?? "",
-            finishReason: choice?.finish_reason ?? "unknown",
-            usage: resp?.usage
-              ? { input: resp.usage.prompt_tokens ?? 0, output: resp.usage.completion_tokens ?? 0 }
-              : { input: 0, output: 0 },
-          };
         },
         { retries: config.httpRetries ?? 6, label: "groq" },
       );
     },
   };
+}
+
+function buildBody(trimmed, { maxTokens, temperature, withReasoningEffort }) {
+  const body = {
+    model: "", // filled in by caller
+    messages: trimmed,
+    max_completion_tokens: maxTokens,
+    stream: false,
+    response_format: { type: "json_object" },
+    temperature,
+    top_p: 1,
+  };
+  if (withReasoningEffort) body.reasoning_effort = "low";
+  return body;
+}
+
+function toResult(resp) {
+  const choice = resp?.choices?.[0];
+  return {
+    text: choice?.message?.content ?? "",
+    finishReason: choice?.finish_reason ?? "unknown",
+    usage: resp?.usage
+      ? { input: resp.usage.prompt_tokens ?? 0, output: resp.usage.completion_tokens ?? 0 }
+      : { input: 0, output: 0 },
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function trimImages(messages) {

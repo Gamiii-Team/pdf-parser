@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { config } from "../config.js";
+import { auditExplanation } from "../figureContext.js";
 import { renderPage } from "../pymupdf/run.js";
 import { validateSlide, crossCheckSlide, validateFigures, validateTables } from "../validate/slideSchema.js";
 import { logTiming } from "../util/log.js";
@@ -148,7 +149,7 @@ export async function rerunFigures({ pngPath, currentSlide, slideNote = "", figu
     `Items the reviewer marked as NOT figures, or as reviewer-locked (keep them exactly as they are — never move, resize or re-describe them): ${keptDesc || "none"}`,
     `</reviewer>`,
     ...(cropLines.length ? ["Crops:", ...cropLines,
-      "Crop instructions: Image 1 is the full slide. Image 2" + (crops.length > 1 ? " and Image 3" : "") + " is/are crops of the region(s) marked as figure(s) by the reviewer, rendered enlarged for readability. Treat everything inside a crop as part of that figure, including parts that look cut off in Image 1. Describe the whole figure: its overall purpose, every labelled box or group, the text inside each, and how items connect (arrows, flow direction, grouping). Put all text you can read into \"visible_text\", in reading order. If some text is too small to read, say so in \"issues\" instead of guessing. Do not describe anything outside the crop except for context."] : []),
+      "Crop instructions: Image 1 is the full slide. Image 2" + (crops.length > 1 ? " and Image 3" : "") + " is/are crops of the region(s) marked as figure(s) by the reviewer, rendered enlarged for readability. Treat everything inside a crop as part of that figure, including parts that look cut off in Image 1. Describe the structure only: the labelled boxes/groups, the text inside each, and how items connect (arrows, flow direction, grouping). Copy labels verbatim — never infer a category, industry or stakeholder type from the shapes. Put all text you can read into \"visible_text\", in reading order. If some text is too small to read, say so in \"issues\" instead of guessing. Do not describe anything outside the crop except for context."] : []),
     `Look carefully for anything the feedback says is missing or wrong, correct it, keep what is already correct, and return JSON: {"figures": [...], "tables": [...]}.`,
   ].join("\n");
   const usage = { input: 0, output: 0 };
@@ -182,6 +183,190 @@ export async function rerunFigures({ pngPath, currentSlide, slideNote = "", figu
     }
   }
   throw new Error(`re-run failed: ${lastError ?? "unknown error"}`);
+}
+
+/**
+ * Translate a slide's prose fields (title/subtitle/text blocks/notes) to English
+ * in one VLM call. Returns only translated strings; roles/levels/order are kept
+ * by the caller. Throws on failure.
+ */
+export async function translateSlideText({ pngPath, slide, provider, logger }) {
+  const prompt = fs.readFileSync(new URL("../prompts/translateSlide.prompt.md", import.meta.url), "utf8");
+  const image = fs.readFileSync(pngPath);
+  const imageUrl = `data:image/png;base64,${image.toString("base64")}`;
+  const blocks = (slide?.text_blocks ?? []).map((b) => String(b?.text ?? ""));
+  const current = {
+    title: slide?.title ?? null,
+    subtitle: slide?.subtitle ?? null,
+    text_blocks: blocks,
+    speaker_notes: slide?.speaker_notes ?? null,
+  };
+  const user = [
+    `Current slide text fields (may be in another language):`,
+    `<current>${JSON.stringify(current)}</current>`,
+    `Translate every string into English, preserving block order, and return the JSON object.`,
+  ].join("\n");
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const messages = [
+        { role: "system", content: prompt },
+        { role: "user", content: [
+          { type: "text", text: user + (attempt === 1 ? "\n\nReminder: output ONLY the JSON object, no prose, no fences." : "") },
+          { type: "image_url", image_url: { url: imageUrl } },
+        ] },
+      ];
+      const t0 = Date.now();
+      const { text, usage } = await provider.complete(messages, { maxTokens: 4096, temperature: 0.1 });
+      logTiming({ phase: "vlm-call", kind: "translate-slide", slide: slide?.slide, attempt: attempt + 1, input_tokens: usage?.input ?? 0, output_tokens: usage?.output ?? 0, ms: Date.now() - t0 });
+      const parsed = parseModelJson(text);
+      const okNullable = (v) => v === null || typeof v === "string";
+      if (parsed && okNullable(parsed.title) && okNullable(parsed.subtitle) && okNullable(parsed.speaker_notes)
+        && Array.isArray(parsed.text_blocks) && parsed.text_blocks.length === blocks.length
+        && parsed.text_blocks.every((v) => typeof v === "string")) {
+        return {
+          title: parsed.title,
+          subtitle: parsed.subtitle,
+          text_blocks: parsed.text_blocks,
+          speaker_notes: parsed.speaker_notes,
+        };
+      }
+      lastError = `schema mismatch: expected title/subtitle/speaker_notes string|null and text_blocks string[] of length ${blocks.length}`;
+      logger?.warn?.(`translate-slide attempt ${attempt + 1}: ${lastError}`);
+    } catch (err) {
+      lastError = String(err?.message ?? err);
+      logger?.warn?.(`translate-slide attempt ${attempt + 1} failed: ${lastError}`);
+    }
+  }
+  throw new Error(`translate-slide failed: ${lastError ?? "unknown error"}`);
+}
+
+/**
+ * Re-read one figure crop and translate its visible text + description into English.
+ * Returns { title, description, visible_text } (English only); throws on failure.
+ * Data/series values are untouched by the caller — only prose fields are replaced.
+ */
+export async function translateFigure({ cropPath, figure, provider, logger }) {
+  const prompt = fs.readFileSync(new URL("../prompts/translate.prompt.md", import.meta.url), "utf8");
+  const image = fs.readFileSync(cropPath);
+  const imageUrl = `data:image/png;base64,${image.toString("base64")}`;
+  const current = {
+    title: figure?.title ?? null,
+    description: figure?.description ?? null,
+    visible_text: figure?.visible_text ?? [],
+  };
+  const user = [
+    `Current figure JSON (may be in another language):`,
+    `<current>${JSON.stringify(current)}</current>`,
+    `Explain in detail what this figure shows and translate every visible string into English. Return the JSON object.`,
+  ].join("\n");
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const messages = [
+        { role: "system", content: prompt },
+        { role: "user", content: [
+          { type: "text", text: user + (attempt === 1 ? "\n\nReminder: output ONLY the JSON object, no prose, no fences." : "") },
+          { type: "image_url", image_url: { url: imageUrl } },
+        ] },
+      ];
+      const tag = "translate";
+      const t0 = Date.now();
+      const { text, usage: _u } = await provider.complete(messages, { maxTokens: 2048, temperature: 0.1 });
+      logTiming({ phase: "vlm-call", kind: tag, attempt: attempt + 1, input_tokens: _u?.input ?? 0, output_tokens: _u?.output ?? 0, ms: Date.now() - t0 });
+      const parsed = parseModelJson(text);
+      if (parsed && (typeof parsed.title === "string" || parsed.title === null) && (typeof parsed.description === "string" || parsed.description === null) && Array.isArray(parsed.visible_text) && parsed.visible_text.every((v) => typeof v === "string")) {
+        return { title: parsed.title, description: parsed.description, visible_text: parsed.visible_text };
+      }
+      lastError = "translate output failed schema: title/description must be string|null, visible_text must be string[]";
+      logger?.warn?.(`translate attempt ${attempt + 1}: ${lastError}`);
+    } catch (err) {
+      lastError = String(err?.message ?? err);
+      logger?.warn?.(`translate attempt ${attempt + 1} failed: ${lastError}`);
+    }
+  }
+  throw new Error(`translate failed: ${lastError ?? "unknown error"}`);
+}
+
+/**
+ * Explain a figure's meaning using ONLY its extracted data plus a bounded
+ * context packet built from the fed document. Returns the grounded explanation
+ * and a generic audit; never writes the result itself. Throws on bad output.
+ */
+export async function explainFigure({ cropPath, figure, context, provider, logger }) {
+  const prompt = fs.readFileSync(new URL("../prompts/explainFigure.prompt.md", import.meta.url), "utf8");
+  const image = fs.readFileSync(cropPath);
+  const imageUrl = `data:image/png;base64,${image.toString("base64")}`;
+  const figureData = {
+    type: figure?.type ?? null,
+    chart_type: figure?.chart_type ?? null,
+    title: figure?.title ?? null,
+    visible_text: figure?.visible_text ?? [],
+    data: figure?.data ?? null,
+    content: figure?.content ?? null,
+  };
+  // Only the positional visual description is allowed as input — an earlier
+  // interpretive description would be a hallucination feedback loop.
+  if (figure?.visual_description) figureData.visual_description = figure.visual_description;
+
+  const base = [
+    `Figure data (authoritative for every label):`,
+    `<figure_data>${JSON.stringify(figureData)}</figure_data>`,
+    `Document context (from the fed deck):`,
+    `<context>${context?.text ?? ""}</context>`,
+  ].join("\n");
+
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const corrective = attempt === 1
+        ? "\n\nYour previous answer used labels that were not in the supplied data. Use only verbatim strings from <figure_data> or <context>, and list every one in \"labels\"."
+        : "";
+      const messages = [
+        { role: "system", content: prompt },
+        { role: "user", content: [
+          { type: "text", text: base + corrective },
+          { type: "image_url", image_url: { url: imageUrl } },
+        ] },
+      ];
+      const t0 = Date.now();
+      const { text, usage } = await provider.complete(messages, { maxTokens: 4096, temperature: 0.1 });
+      logTiming({ phase: "vlm-call", kind: "explain-figure", slide: context?.slideNumber, attempt: attempt + 1, input_tokens: usage?.input ?? 0, output_tokens: usage?.output ?? 0, ms: Date.now() - t0 });
+      const parsed = parseModelJson(text);
+      const okSchema = parsed
+        && typeof parsed.explanation === "string" && parsed.explanation.trim()
+        && Array.isArray(parsed.evidence) && parsed.evidence.every((v) => typeof v === "string")
+        && Array.isArray(parsed.labels) && parsed.labels.every((v) => typeof v === "string");
+      if (!okSchema) {
+        lastError = "schema mismatch: explanation must be a non-empty string; evidence/labels must be string arrays";
+        logger?.warn?.(`explain-figure attempt ${attempt + 1}: ${lastError}`);
+        continue;
+      }
+      const audit = auditExplanation({
+        explanation: parsed.explanation,
+        evidence: parsed.evidence,
+        labels: parsed.labels,
+        context,
+      });
+      // A first pass that names ungrounded entities gets one corrective retry.
+      // If it still fails, return it flagged rather than silently trusting it.
+      if (!audit.ok && attempt === 0) {
+        logger?.warn?.(`explain-figure attempt 1 ungrounded: ${[...audit.ungrounded, ...audit.flaggedProperNouns].slice(0, 5).join(" | ")}`);
+        continue;
+      }
+      return {
+        explanation: parsed.explanation.trim(),
+        evidence: parsed.evidence,
+        labels: parsed.labels,
+        audit,
+        usage: usage ?? { input: 0, output: 0 },
+      };
+    } catch (err) {
+      lastError = String(err?.message ?? err);
+      logger?.warn?.(`explain-figure attempt ${attempt + 1} failed: ${lastError}`);
+    }
+  }
+  throw new Error(`explain-figure failed: ${lastError ?? "unknown error"}`);
 }
 
 /**

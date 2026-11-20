@@ -67,6 +67,10 @@ export const config = {
   vlmMinGapMs: int("VLM_MIN_GAP_MS", 400),
   vlmGapJitterMs: int("VLM_GAP_JITTER_MS", 100),
   vlmMaxWaitMs: int("VLM_MAX_WAIT_MS", 60_000),
+  // 429 recovery: first retry after this gap (pacer cadence) before escalating
+  // to exponential backoff; how many gentle retries before the global pause.
+  vlm429MinGapMs: int("VLM_429_MIN_GAP_MS", 400),
+  vlm429MaxAttempts: int("VLM_429_MAX_ATTEMPTS", 1),
   // Hard ceiling per VLM call in milliseconds for a cancellation-aware check.
   jobStallMinutes: int("JOB_STALL_MINUTES", 5),
   // Retry budget for a single VLM call (after which the slide is marked failed).

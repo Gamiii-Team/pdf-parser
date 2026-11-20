@@ -97,6 +97,10 @@ test("GET /api/jobs/:id returns result with review flags", async (t) => {
   assert.equal(body.job.mode, "vlm");
   assert.equal(body.result.slides.length, 3);
   assert.equal(body.result.slides[0].reviewed, false);
+  assert.equal(body.job.progress.total, 3);
+  assert.equal(body.job.progress.stage, "review");
+  assert.equal(body.job.progress.etaMs, 0); // all slides done
+  assert.equal(body.job.progress.etaText, "done");
 });
 
 test("slide image serves png bytes", async (t) => {
@@ -143,6 +147,30 @@ test("PUT edits figures; Approve marks slide approved and persists", async (t) =
 
   const again = await api(`/api/jobs/${jobId}`);
   assert.equal(again.body.job.statuses["2"], "approved");
+});
+
+test("approve rebuilds manifest.json to match the accepted edits", async (t) => {
+  if (!dockerOk()) { t.skip("converter image not built"); return; }
+  const slugRoot = path.join(tmp, "vlm", jobId, "vlm");
+  const slugDir = fs.readdirSync(slugRoot, { withFileTypes: true }).find((e) => e.isDirectory());
+  assert.ok(slugDir, "vlm model folder exists in the job directory");
+  const manifestPath = path.join(slugRoot, slugDir.name, "manifest.json");
+  assert.ok(fs.existsSync(manifestPath), "manifest.json present in job folder");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.equal(manifest.pages, 3);
+  assert.equal(manifest.sections.length, 3);
+  const s2 = manifest.sections.find((s) => s.pages[0] === 2);
+  assert.equal(s2.heading, "Slide 2 headline");
+  const chart = s2.content.find((b) => b.type === "chart");
+  assert.equal(chart.title, "EDITED BY REVIEWER");
+  assert.equal(chart.description, "edited figure");
+  assert.equal(chart.needs_review, false, "approved blocks clear needs_review");
+  assert.equal(chart.review_status, undefined, "approved chart blocks carry no pending marker");
+  for (const f of [chart]) {
+    assert.equal("reviewed" in f, false);
+    assert.equal("previous" in f, false);
+  }
+  assert.equal(manifest.id, `doc_vlm_${jobId}`);
 });
 
 test("approve with schema-invalid tables is rejected with 400", async (t) => {

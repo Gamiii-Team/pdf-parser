@@ -13,17 +13,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { extractDocument } from "../src/extractDocument.js";
+import { etaFor, formatEtaMs } from "../src/eta.js";
 import { runPptxVlmDeck } from "../src/pptxVlmRun.js";
 import { validatePptx } from "../src/input/pptxValidate.js";
 import { makeProvider } from "../src/providers/index.js";
-import { rerunFigures } from "../src/extract/slideVlm.js";
+import { rerunFigures, translateFigure, translateSlideText, explainFigure } from "../src/extract/slideVlm.js";
+import { buildFigureContext } from "../src/figureContext.js";
 import { markCancelled } from "../src/pptxVlmRun.js";
 import { validateSlide, stripReviewOnly, validateFigures as _validateFigures, validateTables as _validateTables } from "../src/validate/slideSchema.js";
 void stripReviewOnly;
 import { applyRerun, undoRerun } from "../src/slideMerge.js";
 import { renderFigureCrop } from "../src/crop.js";
 import { tiles2x2, mergeVisibleText, zoomTilesWithVlm } from "../src/zoom.js";
-import { mergeSlides, writeMainAtomic } from "../src/mergeMain.js";
+import { mergeSlides, writeMainAtomic, writeFileAtomic } from "../src/mergeMain.js";
+import { buildManifest } from "../src/vlmManifest.js";
 import { config, missingFor, MAX_PAGES } from "../src/config.js";
 import { createLogger } from "../src/util/log.js";
 import { genRunId, formatRunFolder, stripExt } from "../src/util/runName.js";
@@ -214,14 +217,24 @@ sweepVlmJobs(); // one sweep at boot; listVlmJobs re-sweeps lazily
 
 // Rebuild main.json atomically from the on-disk result+status.
 // Called whenever per-slide state changes so export is never stale.
-function rebuildMain(vlm) {
+function renderMainAndManifest(vlm, statusesOverride) {
   try {
     const result = readJsonSafe(path.join(vlm.dir, "result.json"));
+    if (!result) return null;
     const status = readJsonSafe(path.join(vlm.dir, "status.json"));
-    if (!result || !status) return null;
-    return mergeSlides(result, status.slides ?? {});
+    const statuses = statusesOverride ?? status?.slides ?? {};
+    const merged = mergeSlides(result, statuses);
+    writeMainAtomic(vlm.dir, merged);
+    // Manifest is rebuilt from the same merged state as main.json, so it always
+    // reflects the reviewed figures/tables (no review-only fields, no excluded
+    // figures, pending marked where slides aren't approved yet).
+    const hints = Array.isArray(vlm.hints) ? vlm.hints.filter((h) => !h?.hidden && !h?.empty) : [];
+    const safeHints = hints.length === result.slides?.length ? hints : [];
+    const manifest = buildManifest(result, statuses, safeHints, { sourceFile: result?.source_file ?? `${result?.input ?? "deck"}` });
+    writeFileAtomic(path.join(vlm.dir, "manifest.json"), manifest);
+    return { main: merged, manifest };
   } catch (err) {
-    console.error("rebuildMain failed:", err);
+    console.error("renderMainAndManifest failed:", err);
     return null;
   }
 }
@@ -241,16 +254,15 @@ function normalizeSlideStatuses(raw, slides) {
   return map;
 }
 
-function renderMainJson(vlm) {
-  const merged = rebuildMain(vlm);
-  if (!merged) return null;
-  const main = writeMainAtomic(vlm.dir, merged);
-  return merged;
-}
+// Call sites report { ok, main: { jobId, slides: N } } to the UI — keep that shape.
+function renderMainJson(vlm) { return renderMainAndManifest(vlm)?.main ?? null; }
 
 const app = express();
 // Track slides currently inside re-run/zoom so Approve can refuse until they finish.
 const rerunsInFlight = new Set();
+// Track slides currently being translated to English so auto-translate and the
+// manual endpoint never run concurrently for the same slide.
+const translationsInFlight = new Set();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 
@@ -528,6 +540,9 @@ app.get("/api/jobs/:id", (req, res) => {
   const created = vlm.result?.created ?? statusObj?.created ?? null;
   const done = Object.values(statuses).filter((s) => (s === "done") || (s === "approved") || (s === "reviewing") || (s === "auto") || (s === "failed") || (s === "queued")).length;
   const queuedCount = Object.values(statuses).filter((s) => s === "queued").length;
+  const startedAt = statusObj?.startedAt ?? created ?? null;
+  const total = vlm.result?.slides?.length ?? 0;
+  const etaMs = startedAt != null ? etaFor({ done, total, startedAt, now: Date.now() }) : null;
   res.json({
     job: {
       id: vlm.id, mode: "vlm",
@@ -539,11 +554,12 @@ app.get("/api/jobs/:id", (req, res) => {
       error: statusObj?.error ?? null,
       slides: vlm.result?.slides?.length ?? 0,
       issues: statusObj?.issues ?? [],
+      translations: statusObj?.translations ?? {},
       outDir: vlm.dir,
       queue,
       skipped,
       statuses,
-      progress: { done, total: vlm.result?.slides?.length ?? 0, queued: queuedCount },
+      progress: { done, total, queued: queuedCount, stage: statusObj?.stage ?? statusObj?.status ?? null, startedAt, etaMs, etaText: etaMs == null ? null : formatEtaMs(etaMs) },
     },
     result: vlm.result,
     report: vlm.report,
@@ -675,9 +691,8 @@ app.post("/api/jobs/:id/slides/:n/rerun", async (req, res) => {
   const pngPath = path.join(vlm.slidesDir, `${String(n).padStart(2, "0")}.png`);
   if (!fs.existsSync(pngPath)) return res.status(400).json({ error: "slide image missing — cannot rerun" });
 
-  try {
-    // Render crops (≤2) for boxed target figures before calling the model — the
-    // review screen encourages one box per figure; full slide + crops = ≤3 images/request.
+  // Render crops (≤2) for boxed target figures before calling the model — the
+  // review screen encourages one box per figure; full slide + crops = ≤3 images/request.
     const figureIndexes = Array.isArray(req.body?.figureIndexes)
       ? req.body.figureIndexes.filter((i) => Number.isInteger(i) && i >= 0 && i < (current.figures?.length ?? 0))
       : null; // null = whole slide re-run (current behaviour)
@@ -694,13 +709,24 @@ app.post("/api/jobs/:id/slides/:n/rerun", async (req, res) => {
         } catch (e) { /* crop is a hint, not a requirement — fall back to whole-slide */ }
       }
     }
+    const logger = { info() {}, warn() {}, error() {} };
     const { figures, tables, usage: _u } = await rerunFigures({
       pngPath, currentSlide: current, slideNote, figureNotes,
-      provider: makeProvider("groq"), logger: { info() {}, warn() {}, error() {} },
+      provider: makeProvider("groq"), logger,
       crops,
     });
     const merged = applyRerun(current, { figures, tables }, hint);
     void _u;
+
+    // Re-extracted figures keep their literal data; only meaning is re-grounded
+    // against the deck context. Re-run crops are reused when available.
+    const cropByIndex = new Map(crops.map((c) => [c.index, c.path]));
+    const grounded = await groundFigureExplanations(
+      vlm, n, merged.figures, makeProvider(), (i) => cropByIndex.get(i) ?? null,
+      { ...vlm.result, slides: vlm.result.slides.map((s, i) => (i === idx ? merged : s)) },
+      logger,
+    );
+    merged.figures = grounded.figures;
 
     vlm.result.slides[idx] = merged;
     fs.writeFileSync(path.join(vlm.dir, "result.json"), JSON.stringify(vlm.result, null, 2));
@@ -715,9 +741,6 @@ app.post("/api/jobs/:id/slides/:n/rerun", async (req, res) => {
     res.json({ ok: true, slide: merged });
   } catch (err) {
     res.status(422).json({ error: String(err?.message ?? err) });
-  } finally {
-    rerunsInFlight.delete(`${req.params.id}:${n}`);
-  }
   } finally {
     rerunsInFlight.delete(`${req.params.id}:${n}`);
   }
@@ -791,6 +814,262 @@ app.post("/api/jobs/:id/slides/:n/zoom", async (req, res) => {
   }
 });
 
+// Replace each figure's free-form description with a document-grounded
+// explanation. Extraction is left untouched; only the explanation step is
+// constrained by the context packet built from the already-fed deck.
+async function groundFigureExplanations(vlm, n, figures, provider, cropFor = () => null, resultOverride = null, log = { info() {}, warn() {}, error() {} }) {
+  const out = [];
+  const failures = [];
+  let grounded = 0;
+  for (const [i, fig] of (figures ?? []).entries()) {
+    if (!fig || fig.excluded) { out.push(fig); continue; }
+    const fallback = path.join(vlm.slidesDir, `${String(n).padStart(2, "0")}.png`);
+    const cropPath = cropFor(i) ?? (Array.isArray(fig.bbox) && fs.existsSync(fallback) ? fallback : null);
+    if (!cropPath || !fs.existsSync(cropPath)) { out.push(fig); continue; }
+    try {
+      const context = buildFigureContext({ result: resultOverride ?? vlm.result, hints: vlm.hints, slideNumber: n, figureIndex: i });
+      const r = await explainFigure({ cropPath, figure: fig, context, provider, logger: log });
+      out.push({
+        ...fig,
+        visual_description: fig.description,
+        description: r.explanation,
+        explanation_evidence: r.evidence,
+        explanation_labels: r.labels,
+        explanation_audit: r.audit,
+        needs_review: !r.audit.ok ? true : fig.needs_review,
+      });
+      grounded += 1;
+    } catch (err) {
+      failures.push(`figure ${i + 1}: ${String(err?.message ?? err)}`);
+      out.push(fig);
+    }
+  }
+  return { figures: out, grounded, failures };
+}
+
+// Translate an approved slide's full contents into English via the configured
+// VLM backend: title/subtitle/text blocks/notes (one full-slide call) plus a
+// faithful translation of every non-excluded figure crop. Meaning/explanation
+// is added afterwards by groundFigureExplanations. Non-text fields
+// (bbox, data, roles, excluded, review flags) are preserved. Idempotent.
+async function translateSlide(vlm, n) {
+  const idx = n - 1;
+  const current = vlm.result?.slides?.[idx];
+  if (!current) return { translated: 0, failures: [], updated: null };
+
+  const slidePng = path.join(vlm.slidesDir, `${String(n).padStart(2, "0")}.png`);
+  const sourcePdf = path.join(vlm.dir, "source.pdf");
+  const cropDir = path.join(vlm.dir, "crops");
+  fs.mkdirSync(cropDir, { recursive: true });
+  const logger = { info() {}, warn() {}, error() {} };
+  // Use the backend configured for this job (Groq or Modal) — never hardcode one.
+  const provider = makeProvider();
+  let translated = 0;
+  const failures = [];
+  let prose = null;
+
+  // 1) Slide text: title/subtitle/body blocks/notes in a single paced VLM call.
+  if (fs.existsSync(slidePng)) {
+    try {
+      prose = await translateSlideText({ pngPath: slidePng, slide: current, provider, logger });
+      translated += 1;
+    } catch (err) {
+      failures.push(`text: ${String(err?.message ?? err)}`);
+    }
+  }
+
+  // 2) Figures: faithful translation of the figure's own text (no interpretation),
+  //    then a separate grounded explanation step further down.
+  const figures = current.figures ?? [];
+  const cropPaths = [];
+  const nextFigures = await Promise.all(figures.map(async (f, i) => {
+    if (f?.excluded) return f;
+    try {
+      let cropPath = slidePng;
+      if (Array.isArray(f.bbox) && fs.existsSync(sourcePdf)) {
+        cropPath = path.join(cropDir, `translate-${i}.png`);
+        await renderFigureCrop(sourcePdf, n, f.bbox, cropPath, { pad: 0.03, dpi: 300 });
+      }
+      cropPaths[i] = cropPath;
+      const en = await translateFigure({ cropPath, figure: f, provider, logger });
+      translated += 1;
+      return { ...f, title: en.title, visual_description: f.description, description: en.description, visible_text: en.visible_text, translated: true };
+    } catch (err) {
+      failures.push(`figure ${i + 1}: ${String(err?.message ?? err)}`);
+      return f;
+    }
+  }));
+
+  // 3) Merge translated prose back, preserving roles/levels and all other fields.
+  const updated = { ...current, figures: nextFigures };
+  if (prose) {
+    if (prose.title !== null) updated.title = prose.title;
+    if (prose.subtitle !== null) updated.subtitle = prose.subtitle;
+    if (prose.speaker_notes !== null) updated.speaker_notes = prose.speaker_notes;
+    updated.text_blocks = (current.text_blocks ?? []).map((b, i) => (
+      typeof prose.text_blocks[i] === "string" ? { ...b, text: prose.text_blocks[i] } : b
+    ));
+  }
+
+  // 4) Explain meaning using the translated figure data + the deck context only.
+  const contextResult = { ...vlm.result, slides: [...(vlm.result?.slides ?? [])] };
+  contextResult.slides[idx] = updated;
+  const grounded = await groundFigureExplanations(vlm, n, updated.figures, provider, (i) => cropPaths[i] ?? null, contextResult, logger);
+  updated.figures = grounded.figures;
+  translated += grounded.grounded;
+  failures.push(...grounded.failures);
+
+  if (failures.length === 0) updated.translated = true;
+  return { translated, failures, updated };
+}
+
+// Persist per-slide translation state so the review UI can show progress/results.
+function setTranslationState(vlm, n, state, extra = {}) {
+  try {
+    const p = path.join(vlm.dir, "status.json");
+    const status = readJsonSafe(p) ?? {};
+    status.translations = { ...(status.translations ?? {}), [n]: { state, at: Date.now(), ...extra } };
+    status.updated = Date.now();
+    writeFileAtomic(p, status);
+  } catch { /* best effort */ }
+}
+
+// POST translate one slide's full contents into English via the configured backend.
+// Text fields + detailed figure explanations; all non-text fields preserved.
+// Idempotent — safe to re-run; Groq calls are paced by the shared pacer (>=400ms apart).
+app.post("/api/jobs/:id/slides/:n/translate-figures", async (req, res) => {
+  if (!VLM_ID.test(req.params.id)) return res.status(400).json({ error: "invalid job id" });
+  const n = Number.parseInt(req.params.n, 10);
+  if (!Number.isInteger(n) || n < 1) return res.status(400).json({ error: "slide number out of range" });
+  const vlm = readVlmJob(req.params.id);
+  if (!vlm || !vlm.result) return res.status(404).json({ error: "job result not found" });
+  const idx = n - 1;
+  const current = vlm.result?.slides?.[idx];
+  if (!current) return res.status(400).json({ error: `slide ${n} out of range` });
+  if (current.failed) return res.status(422).json({ error: "slide analysis failed — re-run first" });
+  if (rerunsInFlight.has(`${req.params.id}:${n}`)) return res.status(409).json({ error: "re-run in progress for this slide — try again when it finishes" });
+  if (translationsInFlight.has(`${req.params.id}:${n}`)) return res.status(409).json({ error: "translation in progress for this slide — try again when it finishes" });
+
+  const missing = missingFor();
+  if (missing.length) return res.status(400).json({ error: `translate needs the configured ${config.modelBackend} backend: ${missing.join(", ")}` });
+
+  translationsInFlight.add(`${req.params.id}:${n}`);
+  setTranslationState(vlm, n, "translating");
+  try {
+    const { translated, failures, updated } = await translateSlide(vlm, n);
+    if (!updated) return res.status(404).json({ error: "slide vanished during translation" });
+    vlm.result.slides[idx] = updated;
+    fs.writeFileSync(path.join(vlm.dir, "result.json"), JSON.stringify(vlm.result, null, 2));
+    const main = renderMainJson(vlm);
+    setTranslationState(vlm, n, failures.length ? "translate_failed" : "translated", { translated, failures });
+    res.json({ ok: true, translated, failures, main: main ? { jobId: main.jobId, slides: main.slides.length } : null, slide: updated });
+  } catch (err) {
+    setTranslationState(vlm, n, "translate_failed", { error: String(err?.message ?? err) });
+    res.status(422).json({ error: String(err?.message ?? err) });
+  } finally {
+    translationsInFlight.delete(`${req.params.id}:${n}`);
+  }
+});
+
+// POST re-extract one figure's text + grounded explanation at high DPI.
+// Generic: uses only the figure crop and the context packet from the fed deck.
+app.post("/api/jobs/:id/slides/:n/figures/:i/reextract-text", async (req, res) => {
+  if (!VLM_ID.test(req.params.id)) return res.status(400).json({ error: "invalid job id" });
+  const n = Number.parseInt(req.params.n, 10);
+  const figIdx = Number.parseInt(req.params.i, 10);
+  if (!Number.isInteger(n) || n < 1) return res.status(400).json({ error: "slide number out of range" });
+  if (!Number.isInteger(figIdx) || figIdx < 0) return res.status(400).json({ error: "figure index out of range" });
+  const vlm = readVlmJob(req.params.id);
+  if (!vlm || !vlm.result) return res.status(404).json({ error: "job result not found" });
+  const idx = n - 1;
+  const slide = vlm.result?.slides?.[idx];
+  const fig = slide?.figures?.[figIdx];
+  if (!slide || !fig) return res.status(404).json({ error: "figure not found" });
+  if (fig.excluded) return res.status(400).json({ error: "excluded figures are not re-extracted" });
+  const key = `${req.params.id}:${n}`;
+  if (rerunsInFlight.has(key) || translationsInFlight.has(key)) return res.status(409).json({ error: "re-run or translation in progress for this slide" });
+  const missing = missingFor();
+  if (missing.length) return res.status(400).json({ error: `re-extraction needs the configured ${config.modelBackend} backend: ${missing.join(", ")}` });
+
+  translationsInFlight.add(key);
+  try {
+    const provider = makeProvider();
+    const logger = { info() {}, warn() {}, error() {} };
+    const slidePng = path.join(vlm.slidesDir, `${String(n).padStart(2, "0")}.png`);
+    const sourcePdf = path.join(vlm.dir, "source.pdf");
+    let cropPath = slidePng;
+    if (Array.isArray(fig.bbox) && fs.existsSync(sourcePdf)) {
+      cropPath = path.join(vlm.dir, "crops", `reextract-${n}-${figIdx}.png`);
+      fs.mkdirSync(path.dirname(cropPath), { recursive: true });
+      await renderFigureCrop(sourcePdf, n, fig.bbox, cropPath, { pad: 0.04, dpi: 450 });
+    }
+    if (!fs.existsSync(cropPath)) return res.status(400).json({ error: "figure image unavailable" });
+
+    // Literal text first, meaning second — never the other way around.
+    const en = await translateFigure({ cropPath, figure: fig, provider, logger });
+    const literal = {
+      ...fig,
+      title: en.title,
+      visible_text: en.visible_text,
+      visual_description: en.description,
+      description: en.description,
+    };
+    const contextResult = { ...vlm.result, slides: vlm.result.slides.map((s, i) => (i === idx ? { ...slide, figures: slide.figures.map((f, j) => (j === figIdx ? literal : f)) } : s)) };
+    const grounded = await groundFigureExplanations(vlm, n, [literal], provider, () => cropPath, contextResult, logger);
+    const updated = grounded.figures[0] ?? literal;
+    slide.figures[figIdx] = updated;
+    fs.writeFileSync(path.join(vlm.dir, "result.json"), JSON.stringify(vlm.result, null, 2));
+    renderMainAndManifest(vlm);
+    res.json({ ok: true, figure: updated, audit: updated.explanation_audit ?? null, failures: grounded.failures });
+  } catch (err) {
+    res.status(422).json({ error: String(err?.message ?? err) });
+  } finally {
+    translationsInFlight.delete(key);
+  }
+});
+
+// POST translate every approved slide not yet translated (backfill) via the configured backend.
+app.post("/api/jobs/:id/translate-all", async (req, res) => {
+  if (!VLM_ID.test(req.params.id)) return res.status(400).json({ error: "invalid job id" });
+  const vlm = readVlmJob(req.params.id);
+  if (!vlm || !vlm.result) return res.status(404).json({ error: "job result not found" });
+  const missing = missingFor();
+  if (missing.length) return res.status(400).json({ error: `translate needs the configured ${config.modelBackend} backend: ${missing.join(", ")}` });
+
+  const status0 = readJsonSafe(path.join(vlm.dir, "status.json")) ?? {};
+  const slides = vlm.result?.slides ?? [];
+  const targets = slides
+    .filter((s, i) => status0.slides?.[s.slide] === "approved" && !s.translated && !s.failed && !translationsInFlight.has(`${req.params.id}:${s.slide}`))
+    .map((s) => s.slide);
+  if (targets.length === 0) return res.json({ ok: true, queued: 0, note: "no approved slides need translation" });
+
+  // Process sequentially — Groq calls share the pacer; Modal calls stay serialized here.
+  const results = [];
+  for (const n of targets) {
+    const key = `${req.params.id}:${n}`;
+    translationsInFlight.add(key);
+    setTranslationState(vlm, n, "translating");
+    try {
+      const fresh = readVlmJob(req.params.id); // re-read to pick up prior writes
+      const idx = n - 1;
+      const { translated, failures, updated } = await translateSlide(fresh, n);
+      if (updated) {
+        fresh.result.slides[idx] = updated;
+        fs.writeFileSync(path.join(fresh.dir, "result.json"), JSON.stringify(fresh.result, null, 2));
+        setTranslationState(fresh, n, failures.length ? "translate_failed" : "translated", { translated, failures });
+      }
+      results.push({ slide: n, translated, failures });
+    } catch (err) {
+      setTranslationState(vlm, n, "translate_failed", { error: String(err?.message ?? err) });
+      results.push({ slide: n, error: String(err?.message ?? err) });
+    } finally {
+      translationsInFlight.delete(key);
+    }
+  }
+  renderMainAndManifest(readVlmJob(req.params.id));
+  res.json({ ok: true, queued: targets.length, results });
+});
+
 // POST approve the current editor state (figures/tables) → merge into main.json atomically.
 // Idempotent; refused while a re-run is in flight for this slide.
 app.post("/api/jobs/:id/slides/:n/approve", async (req, res) => {
@@ -831,6 +1110,37 @@ app.post("/api/jobs/:id/slides/:n/approve", async (req, res) => {
     res.json({ ok: true, slide, main: main ? { jobId: main.jobId, slides: main.slides.length } : null });
   } catch (err) {
     res.status(500).json({ error: String(err?.message ?? err) });
+  }
+
+  // Auto-translate the approved slide's full contents into English (fire-and-forget).
+  // Approval is never blocked by translation; state is persisted so the review UI
+  // can show progress, and any slide can be re-translated via POST /translate-figures.
+  const tKey = `${req.params.id}:${n}`;
+  if (!translationsInFlight.has(tKey)) {
+    const missing = missingFor();
+    if (missing.length) {
+      setTranslationState(vlm, n, "translate_failed", { error: `backend config missing: ${missing.join(", ")}` });
+    } else {
+      translationsInFlight.add(tKey);
+      setTranslationState(vlm, n, "translating");
+      (async () => {
+        try {
+          const { translated, failures, updated } = await translateSlide(vlm, n);
+          if (updated) {
+            vlm.result.slides[idx] = updated;
+            fs.writeFileSync(path.join(vlm.dir, "result.json"), JSON.stringify(vlm.result, null, 2));
+            renderMainAndManifest(vlm);
+            setTranslationState(vlm, n, failures.length ? "translate_failed" : "translated", { translated, failures });
+          }
+          console.error(`translate: job ${req.params.id} slide ${n} → translated ${translated} field(s), failed ${failures.length}${failures.length ? ` (${failures.slice(0, 3).join(" | ")})` : ""}`);
+        } catch (err) {
+          setTranslationState(vlm, n, "translate_failed", { error: String(err?.message ?? err) });
+          console.error(`translate-after-approve failed for job ${req.params.id} slide ${n}:`, String(err?.message ?? err));
+        } finally {
+          translationsInFlight.delete(tKey);
+        }
+      })();
+    }
   }
 });
 
@@ -915,8 +1225,14 @@ app.get("/api/jobs/:id/export", (req, res) => {
   const vlm = readVlmJob(req.params.id);
   if (!vlm || !vlm.result) return res.status(404).json({ error: "job result not found" });
   const base = stripExt(vlm.result.input ?? "deck") || "deck";
-  const main = mergeSlides(vlm.result, normalizeSlideStatuses(readJsonSafe(path.join(vlm.dir, "status.json"))?.slides, vlm.result.slides ?? []));
-  const mainPath = writeMainAtomic(vlm.dir, main);
+  // Rebuild both deliverables from stored state; statuses are normalized in-memory
+  // for this merge only (a slide edited without approval must export as pending).
+  // No status.json writes on a GET.
+  const statusRaw = readJsonSafe(path.join(vlm.dir, "status.json")) ?? {};
+  const statuses = normalizeSlideStatuses(statusRaw?.slides, vlm.result.slides ?? []);
+  const rebuilt = renderMainAndManifest(vlm, statuses);
+  if (!rebuilt) return res.status(500).json({ error: "failed to rebuild the merged deliverable" });
+  const mainPath = path.join(vlm.dir, "main.json");
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${base.replace(/[^a-zA-Z0-9._-]/g, "_")}.json"`);
   fs.createReadStream(mainPath).pipe(res);

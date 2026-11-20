@@ -6,7 +6,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const REVIEW_ONLY = ["excluded", "reviewer_note", "bbox", "bbox_source", "bbox_locked", "previous", "reviewed", "rerun_count", "rerunCount", "rerunStatus"];
+const REVIEW_ONLY = [
+  "excluded", "reviewer_note", "bbox", "bbox_source", "bbox_locked",
+  "previous", "reviewed", "rerun_count", "rerunCount", "rerunStatus",
+  // Grounding internals stay in result.json for the review UI; the deliverable
+  // keeps only the grounded description plus its evidence.
+  "visual_description", "explanation_labels", "explanation_audit", "needs_review",
+];
 
 /** Has a picture / chart / table on the slide per the native hints for that page. */
 function hintHasObject(hint) {
@@ -35,12 +41,13 @@ export function computeQueue(slides, hints) {
 }
 
 /** Review-only fields are stripped from every figure. Excluded figures are dropped. */
-function stripFigures(figures) {
+export function stripFigures(figures, { keepBox = false } = {}) {
+  const dropKeys = keepBox ? REVIEW_ONLY.filter((k) => k !== "bbox" && k !== "bbox_source") : REVIEW_ONLY;
   return (Array.isArray(figures) ? figures : [])
     .filter((f) => !f?.excluded)
     .map((f) => {
       const cleaned = { ...f };
-      for (const key of REVIEW_ONLY) delete cleaned[key];
+      for (const key of dropKeys) delete cleaned[key];
       return cleaned;
     });
 }
@@ -53,8 +60,10 @@ function stripTables(tables) {
  * Build the final main.json document from a result.json document.
  * Review-only fields are removed everywhere; excluded figures are dropped;
  * slides not yet approved carry review_status "pending"; failed slides carry failed:true.
+ * With { keepBox: true } the figure bounding boxes are retained (the manifest keeps them;
+ * main.json does not).
  */
-export function mergeSlides(result, statuses) {
+export function mergeSlides(result, statuses, { keepBox = false } = {}) {
   const statusMap = statuses ?? {};
   const slidesOut = (Array.isArray(result?.slides) ? result.slides : []).map((slide) => {
     const n = slide?.slide;
@@ -71,7 +80,7 @@ export function mergeSlides(result, statuses) {
     delete base.previous;
     const merged = {
       ...base,
-      figures: stripFigures(slide.figures),
+      figures: stripFigures(slide.figures, { keepBox }),
       tables: stripTables(slide.tables),
     };
     if (reviewStatus) merged.review_status = reviewStatus;
@@ -88,13 +97,18 @@ export function mergeSlides(result, statuses) {
   };
 }
 
-/** Write main.json atomically: temp file in the same folder, then rename. */
-export function writeMainAtomic(outDir, main) {
-  const target = path.join(outDir, "main.json");
-  const temp = path.join(outDir, `.main.json.tmp-${process.pid}-${Date.now()}`);
-  fs.writeFileSync(temp, JSON.stringify(main, null, 2));
+/** Write JSON atomically: temp file in the same folder, then rename. */
+export function writeFileAtomic(target, data) {
+  const dir = path.dirname(target);
+  const temp = path.join(dir, `.${path.basename(target)}.tmp-${process.pid}-${Date.now()}`);
+  fs.writeFileSync(temp, JSON.stringify(data, null, 2));
   fs.renameSync(temp, target);
   return target;
+}
+
+/** Write main.json atomically: temp file in the same folder, then rename. */
+export function writeMainAtomic(outDir, main) {
+  return writeFileAtomic(path.join(outDir, "main.json"), main);
 }
 
 /** Read the in-memory artifacts (outDir) → { result, status }. */

@@ -22,77 +22,9 @@ import { extractSlidesVlm } from "./extract/slideVlm.js";
 import { analyzePdf } from "./pymupdf/run.js";
 import { makeProvider } from "./providers/index.js";
 import { genRunId, modelSlug } from "./util/runName.js";
-import { buildStatusSlideMap, mergeSlides, writeMainAtomic } from "./mergeMain.js";
+import { buildStatusSlideMap, mergeSlides, writeMainAtomic, writeFileAtomic } from "./mergeMain.js";
+import { buildManifest } from "./vlmManifest.js";
 import { recentTimings } from "./util/log.js";
-
-function groupConsecutiveBullets(slidesBlocks) {
-  // Per-slide: merge consecutive bullet text blocks into one list block.
-  const out = [];
-  let list = null;
-  const flush = () => { if (list) out.push(list); list = null; };
-  for (const b of slidesBlocks) {
-    if (b.role === "bullet") {
-      if (!list) list = { type: "list", items: [], level: b.level ?? 0, caption: null, needs_review: false };
-      list.items.push(b.text);
-    } else {
-      flush();
-      out.push(b);
-    }
-  }
-  flush();
-  return out;
-}
-
-function chartTypeFromNative(hint) {
-  const raw = String(hint?.chart_type ?? "").toUpperCase();
-  if (raw.includes("BAR") || raw.includes("COLUMN")) return "bar";
-  if (raw.includes("LINE")) return "line";
-  if (raw.includes("PIE") || raw.includes("DOUGHNUT")) return "pie";
-  if (raw.includes("SCATTER")) return "scatter";
-  return "other";
-}
-
-function slideToBlocks(slideJson, hint) {
-  const blocks = [];
-  const base = { page: slideJson.slide, caption: null, needs_review: false };
-  if (slideJson.subtitle) blocks.push({ ...base, type: "text", content: String(slideJson.subtitle) });
-  const tb = groupConsecutiveBullets(slideJson.text_blocks ?? []);
-  for (const b of tb) {
-    if (b.type === "list") blocks.push({ ...base, type: "list", items: b.items });
-    else {
-      const role = b.role ?? "body";
-      if (role === "heading") blocks.push({ ...base, type: "heading", content: b.text, level: Math.max(2, Math.min(6, (b.level ?? 0) + 2)) });
-      else if (role === "caption") blocks.push({ ...base, type: "text", content: b.text });
-      else if (role === "footer" || role === "note") blocks.push({ ...base, type: "notes", content: b.text });
-      else blocks.push({ ...base, type: "text", content: b.text });
-    }
-  }
-  for (const t of slideJson.tables ?? []) {
-    blocks.push({ ...base, type: "table", header_rows: (t.headers?.length ? 1 : 0), content: { columns: t.headers ?? [], rows: t.rows ?? [] } });
-  }
-  const hintCharts = hint?.charts ?? [];
-  for (const [i, fig] of (slideJson.figures ?? []).entries()) {
-    const chartHint = hintCharts[i];
-    const hasData = Boolean(fig?.data?.series?.length);
-    // Native hint boxes win the bbox slot when the figure lacks its own.
-    const nativeBox = fig.bbox ?? chartHint?.bbox ?? null;
-    blocks.push({
-      ...base,
-      type: "chart",
-      chart_type: chartTypeFromNative(chartHint),
-      title: fig.title ?? chartHint?.title ?? null,
-      description: fig.description ?? null,
-      content: fig.data ? { ...fig.data, ...(hasData ? {} : {}) } : null,
-      estimates: hasData,
-      needs_review: slideJson.confidence === "low" || !hasData,
-      ...(nativeBox && !fig.bbox ? { bbox: nativeBox, bbox_source: "native" } : {}),
-      ...(fig.bbox ? { bbox: fig.bbox, bbox_source: fig.bbox_source ?? "model" } : {}),
-      ...(fig.bbox_locked ? { bbox_locked: true } : {}),
-    });
-  }
-  if (slideJson.speaker_notes) blocks.push({ ...base, type: "notes", content: slideJson.speaker_notes, caption: "Speaker notes" });
-  return blocks;
-}
 
 export async function runPptxVlmDeck(input, options = {}) {
   if (path.extname(input).toLowerCase() !== ".pptx") {
@@ -118,6 +50,7 @@ export async function runPptxVlmDeck(input, options = {}) {
   const status = {
     id: jobId, mode: "vlm", model, input: path.basename(input),
     created: Date.now(), updated: Date.now(), status: "analyzing",
+    startedAt: Date.now(), stage: "converting",
     slides: {}, issues: [],
   };
   const writeStatus = (patch = {}) => {
@@ -171,6 +104,7 @@ export async function runPptxVlmDeck(input, options = {}) {
 
   const onSlideStatus = (n, s) => { lastProgressAt = Date.now(); status.slides[n] = s; writeStatus(); };
 
+  writeStatus({ stage: "analyzing" });
   const { slides, usage, images, failed } = await extractSlidesVlm({
     pdfPath: path.join(outDir, "source.pdf"), pages, hints: hintsForPages, provider, slidesDir, logger,
     concurrency: Number(process.env.VLM_CONCURRENCY) || 3,
@@ -187,34 +121,8 @@ export async function runPptxVlmDeck(input, options = {}) {
     throw new Error("job cancelled");
   }
 
-  // ─── merge slides into the manifest shape ───
-  const sections = slides.map((s) => {
-    const n = s.slide;
-    if (s.failed) {
-      return {
-        id: `s${String(n).padStart(3, "0")}`, heading: `Slide ${n} — analysis failed`, level: 1,
-        pages: [n], content: [{ page: n, bbox: null, caption: "slide analysis failed", needs_review: true, type: "notes", content: s.issues?.[0] ?? "VLM analysis failed" }], subsections: [],
-      };
-    }
-    const blocks = slideToBlocks(s.json, hintsForPages[n - 1] ?? null);
-    const withIds = blocks.map((b, i) => ({ ...b, id: `b${String(n).padStart(3, "0")}-${String(i + 1).padStart(2, "0")}` }));
-    return {
-      id: `s${String(n).padStart(3, "0")}`,
-      heading: s.json.title ? String(s.json.title) : `Slide ${n}`,
-      level: 1, pages: [n],
-      content: withIds,
-      subsections: [],
-    };
-  });
+  // (manifest is built below, after resultDoc + status map exist)
 
-  const manifest = {
-    id: `doc_${Date.now().toString(16)}`,
-    subject: "unknown",
-    subject_source: "unavailable",
-    source_file: path.resolve(input),
-    pages: analysis.num_pages,
-    sections,
-  };
   const report = {
     run_id: jobId, mode: "vlm", model, backend,
     source_file: path.resolve(input),
@@ -231,6 +139,9 @@ export async function runPptxVlmDeck(input, options = {}) {
   const resultDoc = {
     jobId, mode: "vlm", model, backend,
     input: path.basename(input),
+    source_file: path.resolve(input),
+    subject: "unknown",
+    subject_source: "unavailable",
     created: t0,
     slides: slides.map((s) => s.failed
       ? { slide: s.slide, failed: true, issues: s.issues ?? [], confidence: "low" }
@@ -240,11 +151,17 @@ export async function runPptxVlmDeck(input, options = {}) {
   const initialStatuses = buildStatusSlideMap(resultDoc.slides, hints);
   for (const [n, s] of Object.entries(initialStatuses)) status.slides[n] = s;
 
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  // Manifest is built from the same merged state the review page saves — the
+  // first pass and every approve/export rebuild share this code path, so the
+  // manifest always matches the accepted figures and tables.
+  writeStatus({ stage: "merging" });
+  const manifest = buildManifest(resultDoc, status.slides, hintsForPages, { sourceFile: path.resolve(input) });
+
+  writeFileAtomic(manifestPath, manifest);
   fs.writeFileSync(resultPath, JSON.stringify(resultDoc, null, 2));
   fs.writeFileSync(reportPath, JSON.stringify({ ...report, timings: recentTimings() }, null, 2));
   fs.writeFileSync(path.join(outDir, "hints.json"), JSON.stringify(hints, null, 2));
-  writeStatus({ status: "review", slides: status.slides, issues: status.issues });
+  writeStatus({ status: "review", stage: "review", slides: status.slides, issues: status.issues });
   // main.json is the merged deliverable — rebuilt atomically here so a partial read can never observe it revising.
   writeMainAtomic(outDir, mergeSlides(resultDoc, status.slides));
 
